@@ -176,7 +176,7 @@ export const prisma = {
     return runQuery(sql, values);
   },
   $transaction: async (ops: any[]) => {
-    const results = [];
+    const results: any[] = [];
     for (const op of ops) results.push(await op);
     return results;
   },
