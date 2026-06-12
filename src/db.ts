@@ -175,7 +175,11 @@ export const prisma = {
     const sql = strings.reduce((acc, s, i) => acc + s + (values[i] !== undefined ? `$${i + 1}` : ""), "");
     return runQuery(sql, values);
   },
-  $transaction: async (ops: any[]) => {
+  $transaction: async (ops: any) => {
+    if (typeof ops === "function") {
+      // Execute transaction callback with prisma instance itself as mock transaction context
+      return await ops(prisma);
+    }
     const results: any[] = [];
     for (const op of ops) results.push(await op);
     return results;
