@@ -1,0 +1,36 @@
+export const BOX_MULTIPLIERS: Record<number, number> = {
+  0: 5,
+  1: 5,
+  2: 5,
+  3: 5,
+  4: 10,
+  5: 15,
+  6: 25,
+  7: 45
+};
+
+export enum RoundState {
+  BETTING = "BETTING",
+  LOCKED = "LOCKED",
+  CALCULATING = "CALCULATING",
+  REVEALING = "REVEALING",
+  FINALIZING = "FINALIZING",
+  ENDED = "ENDED"
+}
+
+export enum CurrencyMode {
+  FREE_ONLY = "FREE_ONLY",
+  CASH_ONLY = "CASH_ONLY",
+  BOTH_DISABLED = "BOTH_DISABLED"
+}
+
+export enum EventType {
+  BET_PLACED = "BET_PLACED",
+  BET_REJECTED = "BET_REJECTED",
+  ROUND_START = "ROUND_START",
+  ROUND_END = "ROUND_END",
+  PAYOUT = "PAYOUT",
+  ADMIN_OVERRIDE = "ADMIN_OVERRIDE",
+  WALLET_UPDATE = "WALLET_UPDATE",
+  SYSTEM_ALERT = "SYSTEM_ALERT"
+}
