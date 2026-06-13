@@ -203,12 +203,12 @@ export async function initializeDatabase() {
     if (configs.length === 0) {
       await runQuery(
         `INSERT INTO "SystemConfig" (id,"minBet","maxBet","roundDurationBetting","roundDurationCalcul","roundDurationReveal","isFreeEnabled","isCashEnabled","historyLength","isMaintenanceMode","inviteRewardInviter","inviteRewardInvitee","dailyInviteLimit","isReferralActive")
-         VALUES ('singleton',10,10000,25,10,5,true,true,20,false,500,200,5,true)
-         ON CONFLICT (id) DO UPDATE SET "roundDurationBetting"=25,"roundDurationCalcul"=10,"roundDurationReveal"=5`
+         VALUES ('singleton',10,10000,25,4,7,true,true,20,false,500,200,5,true)
+         ON CONFLICT (id) DO UPDATE SET "roundDurationBetting"=25,"roundDurationCalcul"=4,"roundDurationReveal"=7`
       );
       console.log("✅ SystemConfig seeded.");
     } else {
-      await runQuery(`UPDATE "SystemConfig" SET "roundDurationBetting"=25,"roundDurationCalcul"=10,"roundDurationReveal"=5 WHERE id='singleton'`);
+      await runQuery(`UPDATE "SystemConfig" SET "roundDurationBetting"=25,"roundDurationCalcul"=4,"roundDurationReveal"=7 WHERE id='singleton'`);
       console.log("✅ SystemConfig updated.");
     }
 
