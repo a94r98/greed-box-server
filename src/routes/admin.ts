@@ -58,17 +58,24 @@ router.get("/stats", async (req: AuthenticatedRequest, res: Response) => {
 router.get("/users", async (req: AuthenticatedRequest, res: Response) => {
   try {
     const users = await prisma.user.findMany({
-      include: { wallet: true },
       orderBy: { createdAt: "desc" }
     });
-    return res.json({ users });
+    const wallets = await prisma.wallet.findMany();
+    const merged = users.map((u: any) => {
+      const w = wallets.find((wallet: any) => wallet.userId === u.id);
+      return {
+        ...u,
+        wallet: w ? { freeBalance: w.freeBalance, cashBalance: w.cashBalance } : null
+      };
+    });
+    return res.json({ users: merged });
   } catch (err) {
     return res.status(500).json({ error: "Failed to load users." });
   }
 });
 
 // Update user details (Name, Age, Gender, password, publicId, Ban options)
-router.put("/users/:id", requireSuperAdmin, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+router.put("/users/:id", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
   const userId = req.params.id;
   const { displayNickname, age, gender, password, publicId, isBanned, banDays, banReason, removeAvatar } = req.body;
 
@@ -91,6 +98,11 @@ router.put("/users/:id", requireSuperAdmin, async (req: AuthenticatedRequest, re
     }
 
     if (publicId !== undefined && publicId !== user.publicId) {
+      // SuperAdmin validation required for modifying Public ID
+      if (req.user?.role !== "SUPERADMIN") {
+        return res.status(403).json({ error: "تغيير معرف المستخدم يتطلب صلاحيات Super Admin." });
+      }
+
       // Validate unique public ID
       const existing = await prisma.user.findFirst({
         where: { publicId }
@@ -120,6 +132,10 @@ router.put("/users/:id", requireSuperAdmin, async (req: AuthenticatedRequest, re
           expires.setDate(expires.getDate() + parseInt(banDays));
           updateData.banExpiresAt = expires;
         } else {
+          // Permanent Ban check: require SuperAdmin
+          if (req.user?.role !== "SUPERADMIN") {
+            return res.status(403).json({ error: "الحظر النهائي يتطلب صلاحيات Super Admin." });
+          }
           updateData.banExpiresAt = null; // Permanent
         }
       } else {
@@ -131,18 +147,23 @@ router.put("/users/:id", requireSuperAdmin, async (req: AuthenticatedRequest, re
         data: {
           eventType: isBanned ? "ADMIN_BAN_USER" : "ADMIN_UNBAN_USER",
           userId: user.id,
-          message: `User ${user.publicId} status updated to: Banned=${isBanned}. Reason: ${banReason || "none"}`
+          message: `User ${user.publicId} status updated to: Banned=${isBanned}. Reason: ${banReason || "none"} | Executed by Admin: ${req.user?.id}`
         }
       });
     }
 
     const updatedUser = await prisma.user.update({
       where: { id: userId },
-      data: updateData,
-      include: { wallet: true }
+      data: updateData
     });
 
-    return res.json({ message: "تم تحديث بيانات المستخدم بنجاح.", user: updatedUser });
+    const wallet = await prisma.wallet.findUnique({ where: { userId } });
+    const userWithWallet = {
+      ...updatedUser,
+      wallet: wallet ? { freeBalance: wallet.freeBalance, cashBalance: wallet.cashBalance } : null
+    };
+
+    return res.json({ message: "تم تحديث بيانات المستخدم بنجاح.", user: userWithWallet });
   } catch (err: any) {
     console.error("Admin user update error:", err);
     return res.status(500).json({ error: "فشل تحديث بيانات المستخدم." });
@@ -173,7 +194,7 @@ router.post("/users/:id/ban-device", requireSuperAdmin, async (req: Authenticate
       data: {
         eventType: "DEVICE_PERMANENT_BAN",
         userId,
-        message: `BANNED DEVICE ID: [${user.deviceId}] | Reason: ${reason || "Violating terms"}`
+        message: `BANNED DEVICE ID: [${user.deviceId}] | Reason: ${reason || "Violating terms"} | Executed by SuperAdmin: ${req.user?.id}`
       }
     });
 
@@ -183,7 +204,8 @@ router.post("/users/:id/ban-device", requireSuperAdmin, async (req: Authenticate
   }
 });
 
-router.put("/users/:id/balance", requireSuperAdmin, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+// Balance Adjustments (ADMIN allowed)
+router.put("/users/:id/balance", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
   const userId = req.params.id;
   const { freeAmount, cashAmount, reason } = req.body;
 
@@ -195,7 +217,7 @@ router.put("/users/:id/balance", requireSuperAdmin, async (req: AuthenticatedReq
     const wallet = await prisma.wallet.findUnique({ where: { userId } });
     if (!wallet) return res.status(404).json({ error: "User wallet not found." });
 
-    const updated = await prisma.$transaction(async (tx) => {
+    const updated = await prisma.$transaction(async (tx: any) => {
       const finalFree = freeAmount !== undefined ? freeAmount : wallet.freeBalance;
       const finalCash = cashAmount !== undefined ? cashAmount : wallet.cashBalance;
 
@@ -207,10 +229,12 @@ router.put("/users/:id/balance", requireSuperAdmin, async (req: AuthenticatedReq
         }
       });
 
+      const amountDiff = (freeAmount !== undefined ? freeAmount - wallet.freeBalance : 0) + (cashAmount !== undefined ? cashAmount - wallet.cashBalance : 0);
+
       await tx.transaction.create({
         data: {
           userId,
-          amount: (freeAmount !== undefined ? freeAmount - wallet.freeBalance : 0) + (cashAmount !== undefined ? cashAmount - wallet.cashBalance : 0),
+          amount: amountDiff,
           currency: freeAmount !== undefined ? "FREE" : "CASH",
           type: "ADMIN_ADJUSTMENT",
           description: `Admin balance override. Reason: ${reason || "No reason specified"}`
@@ -220,10 +244,12 @@ router.put("/users/:id/balance", requireSuperAdmin, async (req: AuthenticatedReq
       return updatedWallet;
     });
 
-    await logEvent({
-      eventType: EventType.WALLET_UPDATE,
-      userId,
-      message: `SuperAdmin ${req.user?.id} updated user balance: Free=${updated.freeBalance}, Cash=${updated.cashBalance}. Reason: ${reason}`
+    await prisma.eventLog.create({
+      data: {
+        eventType: "WALLET_UPDATE",
+        userId,
+        message: `Admin ${req.user?.id} updated user balance: Free=${updated.freeBalance}, Cash=${updated.cashBalance} (Prev Free=${wallet.freeBalance}, Prev Cash=${wallet.cashBalance}). Reason: ${reason}`
+      }
     });
 
     return res.json({ message: "Balances updated successfully.", wallet: updated });
