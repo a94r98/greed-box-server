@@ -213,8 +213,8 @@ export async function initializeDatabase() {
     }
 
     // HousePools
-    await runQuery(`INSERT INTO "HousePool" (id,type,balance) VALUES ($1,'FREE',10000000) ON CONFLICT (type) DO NOTHING`, [uuidv4()]);
-    await runQuery(`INSERT INTO "HousePool" (id,type,balance) VALUES ($1,'CASH',100000) ON CONFLICT (type) DO NOTHING`, [uuidv4()]);
+    await runQuery(`INSERT INTO "HousePool" (id,type,balance,"updatedAt") VALUES ($1,'FREE',10000000,NOW()) ON CONFLICT (type) DO NOTHING`, [uuidv4()]);
+    await runQuery(`INSERT INTO "HousePool" (id,type,balance,"updatedAt") VALUES ($1,'CASH',100000,NOW()) ON CONFLICT (type) DO NOTHING`, [uuidv4()]);
     console.log("✅ HousePools seeded.");
 
     // Daily Tasks
@@ -245,14 +245,14 @@ export async function initializeDatabase() {
         [adminId, "10000000", "admin@greedboxes.com", passwordHash, "admin", "SuperAdmin", "SUPERADMIN", "server_console", "ADMIN1"]
       );
       await runQuery(
-        `INSERT INTO "Wallet" (id,"userId","freeBalance","cashBalance") VALUES ($1,$2,$3,$4)`,
+        `INSERT INTO "Wallet" (id,"userId","freeBalance","cashBalance","updatedAt") VALUES ($1,$2,$3,$4,NOW())`,
         [uuidv4(), adminId, 1000000.0, 100000.0]
       );
       console.log("✅ SuperAdmin created.");
     }
 
     // Reset all test wallets
-    await runQuery(`UPDATE "Wallet" SET "freeBalance"=1000000,"cashBalance"=100000`);
+    await runQuery(`UPDATE "Wallet" SET "freeBalance"=1000000,"cashBalance"=100000,"updatedAt"=NOW()`);
     console.log("✅ Test wallets reset.");
 
     console.log("🎉 Database initialization complete!");
