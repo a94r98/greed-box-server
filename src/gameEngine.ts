@@ -404,10 +404,12 @@ export class GameEngine {
       this.runTick();
 
     } else if (this.currentStatus === RoundState.CALCULATING) {
-      // Calculations are finished, reveal winner
-      this.currentStatus = RoundState.REVEALING;
-      this.startPhaseTimer(config?.roundDurationReveal || 5);
+      // Calculations are finished, transition directly to finalization / results popup
+      this.currentStatus = RoundState.FINALIZING;
+      this.startPhaseTimer(4); // 4 seconds results window duration
       this.broadcastState();
+      
+      await this.processFinalization();
       this.runTick();
 
     } else if (this.currentStatus === RoundState.REVEALING) {
