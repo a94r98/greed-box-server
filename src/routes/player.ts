@@ -43,10 +43,14 @@ router.get("/profile", authenticateToken, async (req: AuthenticatedRequest, res:
     return res.json({
       profile: {
         id: user.id,
+        publicId: user.publicId,
         username: user.username,
+        displayNickname: user.displayNickname,
         email: user.email,
         role: user.role,
         avatar: user.avatar,
+        age: user.age,
+        gender: user.gender,
         referralCode: user.referralCode,
         referredByCode: user.referredByCode,
         createdAt: user.createdAt,

@@ -1,6 +1,7 @@
 import { Router, Response } from "express";
 import { Worker } from "worker_threads";
 import path from "path";
+import bcrypt from "bcrypt";
 import { prisma } from "../db";
 import { AuthenticatedRequest, authenticateToken, requireAdmin, requireSuperAdmin } from "../authMiddleware";
 import gameEngine from "../gameEngine";
@@ -53,7 +54,7 @@ router.get("/stats", async (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
-// 2. Users CRUD
+// 2. Users List & Details
 router.get("/users", async (req: AuthenticatedRequest, res: Response) => {
   try {
     const users = await prisma.user.findMany({
@@ -63,6 +64,122 @@ router.get("/users", async (req: AuthenticatedRequest, res: Response) => {
     return res.json({ users });
   } catch (err) {
     return res.status(500).json({ error: "Failed to load users." });
+  }
+});
+
+// Update user details (Name, Age, Gender, password, publicId, Ban options)
+router.put("/users/:id", requireSuperAdmin, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.params.id;
+  const { displayNickname, age, gender, password, publicId, isBanned, banDays, banReason, removeAvatar } = req.body;
+
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(404).json({ error: "المستخدم غير موجود." });
+
+    const updateData: any = {};
+
+    if (displayNickname !== undefined) updateData.displayNickname = displayNickname;
+    if (age !== undefined) updateData.age = age ? parseInt(age) : null;
+    if (gender !== undefined) updateData.gender = gender;
+    
+    if (removeAvatar) {
+      updateData.avatar = "avatar_1";
+    }
+
+    if (password) {
+      updateData.passwordHash = await bcrypt.hash(password, 10);
+    }
+
+    if (publicId !== undefined && publicId !== user.publicId) {
+      // Validate unique public ID
+      const existing = await prisma.user.findFirst({
+        where: { publicId }
+      });
+      if (existing) {
+        return res.status(400).json({ error: "الـ ID الجديد مستخدم بالفعل بحساب آخر." });
+      }
+      updateData.publicId = publicId;
+
+      // Log event
+      await prisma.eventLog.create({
+        data: {
+          eventType: "ADMIN_CHANGED_USER_ID",
+          userId: user.id,
+          message: `Old ID: ${user.publicId} | New ID: ${publicId} | Admin: ${req.user?.id}`
+        }
+      });
+    }
+
+    // Handle Ban
+    if (isBanned !== undefined) {
+      updateData.isBanned = isBanned;
+      if (isBanned) {
+        updateData.banReason = banReason || "حظر من قبل الإدارة";
+        if (banDays && parseInt(banDays) > 0) {
+          const expires = new Date();
+          expires.setDate(expires.getDate() + parseInt(banDays));
+          updateData.banExpiresAt = expires;
+        } else {
+          updateData.banExpiresAt = null; // Permanent
+        }
+      } else {
+        updateData.banExpiresAt = null;
+        updateData.banReason = null;
+      }
+
+      await prisma.eventLog.create({
+        data: {
+          eventType: isBanned ? "ADMIN_BAN_USER" : "ADMIN_UNBAN_USER",
+          userId: user.id,
+          message: `User ${user.publicId} status updated to: Banned=${isBanned}. Reason: ${banReason || "none"}`
+        }
+      });
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: updateData,
+      include: { wallet: true }
+    });
+
+    return res.json({ message: "تم تحديث بيانات المستخدم بنجاح.", user: updatedUser });
+  } catch (err: any) {
+    console.error("Admin user update error:", err);
+    return res.status(500).json({ error: "فشل تحديث بيانات المستخدم." });
+  }
+});
+
+// Permanent Device / IP Fingerprint Ban
+router.post("/users/:id/ban-device", requireSuperAdmin, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.params.id;
+  const { reason } = req.body;
+
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(404).json({ error: "المستخدم غير موجود." });
+
+    // Mark user as permanently banned
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        isBanned: true,
+        banExpiresAt: null,
+        banReason: `DEVICE BAN: ${reason || "مخالفة الشروط"}`
+      }
+    });
+
+    // Write a permanent device block signature in EventLogs to intercept GUEST/REGISTER
+    await prisma.eventLog.create({
+      data: {
+        eventType: "DEVICE_PERMANENT_BAN",
+        userId,
+        message: `BANNED DEVICE ID: [${user.deviceId}] | Reason: ${reason || "Violating terms"}`
+      }
+    });
+
+    return res.json({ message: "تم حظر الحساب والجهاز الخاص به نهائياً بنجاح." });
+  } catch (err) {
+    return res.status(500).json({ error: "فشل حظر الجهاز." });
   }
 });
 

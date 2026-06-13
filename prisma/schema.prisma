@@ -11,17 +11,26 @@ generator client {
 
 model User {
   id                 String                  @id @default(uuid())
-  username           String?
+  publicId           String                  @unique // 8-digit unique ID (Unique, Indexed, Searchable)
+  username           String                  @unique // Unique username for handles / profiles
+  displayNickname    String?                 // Visible name (Ali Al Iraqi)
   email              String?                 @unique
   passwordHash       String?
-  role               String                  @default("USER") // USER, ADMIN, SUPERADMIN
+  role               String                  @default("USER") // USER, GUEST, ADMIN, SUPERADMIN
   deviceId           String
   referralCode       String                  @unique
   referredByCode     String?
   avatar             String                  @default("avatar_1")
+  age                Int?
+  gender             String?                 // MALE, FEMALE
   createdAt          DateTime                @default(now())
   roundsPlayed       Int                     @default(0)
   roundsWon          Int                     @default(0)
+  
+  // Ban fields
+  isBanned           Boolean                 @default(false)
+  banExpiresAt       DateTime?               // Null = permanent, Date = temporary ban expiration
+  banReason          String?
   
   wallet             Wallet?
   bets               Bet[]

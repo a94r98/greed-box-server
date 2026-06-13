@@ -235,8 +235,8 @@ export async function initializeDatabase() {
       const passwordHash = await bcrypt.hash("adminpassword", 10);
       const adminId = uuidv4();
       await runQuery(
-        `INSERT INTO "User" (id,email,"passwordHash",username,role,"deviceId","referralCode") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [adminId, "admin@greedboxes.com", passwordHash, "SuperAdmin", "SUPERADMIN", "server_console", "ADMIN1"]
+        `INSERT INTO "User" (id,"publicId",email,"passwordHash",username,"displayNickname",role,"deviceId","referralCode") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [adminId, "10000000", "admin@greedboxes.com", passwordHash, "admin", "SuperAdmin", "SUPERADMIN", "server_console", "ADMIN1"]
       );
       await runQuery(
         `INSERT INTO "Wallet" (id,"userId","freeBalance","cashBalance") VALUES ($1,$2,$3,$4)`,

@@ -12,28 +12,70 @@ function generateReferralCode(): string {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// 1. Guest Authentication / Registration
+// Generates an 8-digit unique public ID
+async function generateUniquePublicId(): Promise<string> {
+  const min = 10000000;
+  const max = 99999999;
+  let attempts = 0;
+  
+  while (attempts < 100) {
+    const candidate = Math.floor(min + Math.random() * (max - min)).toString();
+    const existing = await prisma.user.findUnique({
+      where: { publicId: candidate }
+    });
+    if (!existing) return candidate;
+    attempts++;
+  }
+  return Math.floor(10000000 + Math.random() * 90000000).toString(); // Fallback
+}
+
+// 1. Guest Authentication / Registration (Multi-account checking, Device ID Banning, 8-digit ID)
 router.post("/guest", async (req, res): Promise<any> => {
-  const { deviceId } = req.body;
+  const { deviceId, fingerprint } = req.body;
   if (!deviceId) {
     return res.status(400).json({ error: "Device ID is required." });
   }
 
   try {
+    // Check if the device fingerprint or deviceId is permanently banned
+    const bannedDevice = await prisma.eventLog.findFirst({
+      where: {
+        eventType: "DEVICE_PERMANENT_BAN",
+        message: {
+          contains: deviceId
+        }
+      }
+    });
+
+    if (bannedDevice) {
+      return res.status(403).json({ error: "This device has been permanently banned from accessing Greedy Box." });
+    }
+
     // Check if user with deviceId already exists and is a guest (no email)
     let user = await prisma.user.findFirst({
       where: { deviceId, email: null }
     });
 
     if (!user) {
+      // Rule: Max 3 accounts per device limit
+      const existingAccountsCount = await prisma.user.count({
+        where: { deviceId }
+      });
+
+      if (existingAccountsCount >= 3) {
+        return res.status(400).json({ error: "لقد تجاوزت الحد الأقصى للحسابات المسموح بإنشائها على هذا الجهاز (3 حسابات)." });
+      }
+
       // Create new Guest user
       const referralCode = generateReferralCode();
+      const publicId = await generateUniquePublicId();
       user = await prisma.user.create({
         data: {
+          publicId,
           deviceId,
           role: "GUEST",
           referralCode,
-          username: `Guest_${referralCode}`
+          username: `guest_${publicId}`
         }
       });
 
@@ -41,10 +83,34 @@ router.post("/guest", async (req, res): Promise<any> => {
       await prisma.wallet.create({
         data: {
           userId: user.id,
-          freeBalance: 1000000.0,
-          cashBalance: 100000.0
+          freeBalance: 1000.0, // Default Free Coins
+          cashBalance: 0.0     // Default Cash
         }
       });
+
+      await prisma.eventLog.create({
+        data: {
+          eventType: "USER_REGISTER_GUEST",
+          userId: user.id,
+          message: `Registered guest account ${publicId} on device ${deviceId}`
+        }
+      });
+    }
+
+    // Check if User is banned
+    if (user.isBanned) {
+      if (user.banExpiresAt && new Date() > new Date(user.banExpiresAt)) {
+        // Unban since time passed
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { isBanned: false, banExpiresAt: null, banReason: null }
+        });
+      } else {
+        const remaining = user.banExpiresAt 
+          ? `حتى ${new Date(user.banExpiresAt).toLocaleString()}`
+          : "حظر نهائي";
+        return res.status(403).json({ error: `هذا الحساب محظور حالياً. (${remaining}). السبب: ${user.banReason || "غير محدد"}` });
+      }
     }
 
     const token = jwt.sign(
@@ -57,10 +123,13 @@ router.post("/guest", async (req, res): Promise<any> => {
       token,
       user: {
         id: user.id,
+        publicId: user.publicId,
         username: user.username,
+        displayNickname: user.displayNickname,
         role: user.role,
         avatar: user.avatar,
-        referralCode: user.referralCode
+        referralCode: user.referralCode,
+        isGuest: true
       }
     });
   } catch (error) {
@@ -69,26 +138,55 @@ router.post("/guest", async (req, res): Promise<any> => {
   }
 });
 
-// 2. Email Registration
+// 2. Email Registration (Age limit, device account limit, 8-digit unique ID)
 router.post("/register", async (req, res): Promise<any> => {
-  const { email, password, username, deviceId, refCode } = req.body;
-  if (!email || !password || !deviceId) {
-    return res.status(400).json({ error: "Email, password, and Device ID are required." });
+  const { email, password, username, displayNickname, age, gender, deviceId, refCode } = req.body;
+  if (!email || !password || !deviceId || !username) {
+    return res.status(400).json({ error: "جميع الحقول المطلوبة يجب ملؤها." });
+  }
+
+  // Age validation
+  if (age !== undefined && parseInt(age) < 18) {
+    return res.status(400).json({ error: "عذراً، يجب أن يكون عمرك 18 سنة أو أكثر للتسجيل." });
   }
 
   try {
+    // Check if the device is banned
+    const bannedDevice = await prisma.eventLog.findFirst({
+      where: {
+        eventType: "DEVICE_PERMANENT_BAN",
+        message: { contains: deviceId }
+      }
+    });
+    if (bannedDevice) {
+      return res.status(403).json({ error: "هذا الجهاز محظور نهائياً من اللعب." });
+    }
+
     // Check if email already taken
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) {
-      return res.status(400).json({ error: "Email is already registered." });
+    const existingEmail = await prisma.user.findUnique({ where: { email } });
+    if (existingEmail) {
+      return res.status(400).json({ error: "البريد الإلكتروني مسجل بالفعل." });
+    }
+
+    // Check if username already taken
+    const existingUser = await prisma.user.findUnique({ where: { username } });
+    if (existingUser) {
+      return res.status(400).json({ error: "اسم المستخدم (Username) مستخدم بالفعل." });
+    }
+
+    // Rule: Max 3 accounts per device limit
+    const existingAccountsCount = await prisma.user.count({
+      where: { deviceId }
+    });
+    if (existingAccountsCount >= 3) {
+      return res.status(400).json({ error: "لقد تجاوزت الحد الأقصى للحسابات المسموح بإنشائها على هذا الجهاز (3 حسابات)." });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
     const referralCode = generateReferralCode();
+    const publicId = await generateUniquePublicId();
 
-    // Perform inside transaction to link wallet and referrals cleanly
     const user = await prisma.$transaction(async (tx) => {
-      // Check system configuration to verify referral payouts
       const config = await tx.systemConfig.findUnique({ where: { id: "singleton" } });
 
       let inviterId: string | null = null;
@@ -101,9 +199,13 @@ router.post("/register", async (req, res): Promise<any> => {
 
       const newUser = await tx.user.create({
         data: {
+          publicId,
           email,
           passwordHash,
-          username: username || email.split("@")[0],
+          username,
+          displayNickname: displayNickname || username,
+          age: age ? parseInt(age) : null,
+          gender,
           deviceId,
           role: "USER",
           referralCode,
@@ -111,16 +213,15 @@ router.post("/register", async (req, res): Promise<any> => {
         }
       });
 
-      // Wallet
+      // Wallet Initializer
       await tx.wallet.create({
         data: {
           userId: newUser.id,
-          freeBalance: 1000000.0,
-          cashBalance: 100000.0
+          freeBalance: 1000.0, // Default Coins
+          cashBalance: 0.0
         }
       });
 
-      // If referred, log the referral relation
       if (inviterId) {
         await tx.referral.create({
           data: {
@@ -134,6 +235,14 @@ router.post("/register", async (req, res): Promise<any> => {
       return newUser;
     });
 
+    await prisma.eventLog.create({
+      data: {
+        eventType: "USER_REGISTER",
+        userId: user.id,
+        message: `Registered user ${user.publicId} with email ${email} on device ${deviceId}`
+      }
+    });
+
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role, deviceId: user.deviceId },
       JWT_SECRET,
@@ -144,39 +253,75 @@ router.post("/register", async (req, res): Promise<any> => {
       token,
       user: {
         id: user.id,
+        publicId: user.publicId,
         email: user.email,
         username: user.username,
+        displayNickname: user.displayNickname,
         role: user.role,
         avatar: user.avatar,
-        referralCode: user.referralCode
+        referralCode: user.referralCode,
+        isGuest: false
       }
     });
   } catch (error) {
     console.error("Register error:", error);
-    return res.status(500).json({ error: "Failed to create account." });
+    return res.status(500).json({ error: "فشل في إنشاء الحساب." });
   }
 });
 
-// 3. Email Login
+// 3. Login Endpoint (Supports Email login AND 8-digit unique ID login + Ban check)
 router.post("/login", async (req, res): Promise<any> => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required." });
+  const { loginInput, email, password } = req.body;
+  // Fallback to compatibility 'email' field if loginInput not present
+  const identifier = loginInput || email;
+  if (!identifier || !password) {
+    return res.status(400).json({ error: "يرجى إدخال البريد الإلكتروني أو الـ ID مع كلمة المرور." });
   }
 
   try {
-    const user = await prisma.user.findUnique({
-      where: { email }
+    // Find user by email OR publicId (8-digit ID)
+    const user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { email: identifier },
+          { publicId: identifier }
+        ]
+      }
     });
 
     if (!user || !user.passwordHash) {
-      return res.status(401).json({ error: "Invalid email or password." });
+      return res.status(401).json({ error: "بيانات الدخول غير صحيحة." });
     }
 
     const validPassword = await bcrypt.compare(password, user.passwordHash);
     if (!validPassword) {
-      return res.status(401).json({ error: "Invalid email or password." });
+      return res.status(401).json({ error: "بيانات الدخول غير صحيحة." });
     }
+
+    // Check if user is banned
+    if (user.isBanned) {
+      if (user.banExpiresAt && new Date() > new Date(user.banExpiresAt)) {
+        // Unban since time passed
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { isBanned: false, banExpiresAt: null, banReason: null }
+        });
+      } else {
+        const remaining = user.banExpiresAt 
+          ? `حتى ${new Date(user.banExpiresAt).toLocaleString()}`
+          : "حظر نهائي";
+        return res.status(403).json({ error: `هذا الحساب محظور حالياً. (${remaining}). السبب: ${user.banReason || "غير محدد"}` });
+      }
+    }
+
+    // Track Login in Event Logs
+    await prisma.eventLog.create({
+      data: {
+        eventType: "USER_LOGIN",
+        userId: user.id,
+        message: `Logged in user ${user.publicId} via identifier ${identifier}`
+      }
+    });
 
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role, deviceId: user.deviceId },
@@ -188,42 +333,44 @@ router.post("/login", async (req, res): Promise<any> => {
       token,
       user: {
         id: user.id,
+        publicId: user.publicId,
         email: user.email,
         username: user.username,
+        displayNickname: user.displayNickname,
         role: user.role,
         avatar: user.avatar,
-        referralCode: user.referralCode
+        referralCode: user.referralCode,
+        isGuest: user.role === "GUEST"
       }
     });
   } catch (error) {
     console.error("Login error:", error);
-    return res.status(500).json({ error: "An error occurred during login." });
+    return res.status(500).json({ error: "حدث خطأ أثناء عملية تسجيل الدخول." });
   }
 });
 
-// 4. Upgrade / Link Guest Account
+// 4. Upgrade / Link Guest Account (Promotes GUEST to USER, sets email and password)
 router.post("/link", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
-  const { email, password, username } = req.body;
+  const { email, password, username, displayNickname, age, gender } = req.body;
   const userId = req.user?.id;
 
   if (!email || !password || !userId) {
-    return res.status(400).json({ error: "Email and password are required to link account." });
+    return res.status(400).json({ error: "البريد الإلكتروني وكلمة المرور مطلوبة لترقية الحساب." });
   }
 
   try {
-    // Check if user is currently a Guest
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
-      return res.status(404).json({ error: "User not found." });
+      return res.status(404).json({ error: "المستخدم غير موجود." });
     }
     if (user.email) {
-      return res.status(400).json({ error: "Account is already linked to an email." });
+      return res.status(400).json({ error: "الحساب مربوط بالفعل ببريد إلكتروني." });
     }
 
-    // Check if email is already in use by another user
+    // Check if email already in use
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) {
-      return res.status(400).json({ error: "Email is already registered on another account." });
+      return res.status(400).json({ error: "البريد الإلكتروني مسجل بالفعل بحساب آخر." });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
@@ -234,7 +381,18 @@ router.post("/link", authenticateToken, async (req: AuthenticatedRequest, res: R
         email,
         passwordHash,
         username: username || user.username,
+        displayNickname: displayNickname || user.displayNickname,
+        age: age ? parseInt(age) : null,
+        gender: gender || null,
         role: "USER" // Promote to USER
+      }
+    });
+
+    await prisma.eventLog.create({
+      data: {
+        eventType: "USER_LINK_ACCOUNT",
+        userId: updatedUser.id,
+        message: `Linked guest account ${updatedUser.publicId} to email ${email}`
       }
     });
 
@@ -245,34 +403,75 @@ router.post("/link", authenticateToken, async (req: AuthenticatedRequest, res: R
     );
 
     return res.json({
-      message: "Guest account successfully linked and promoted.",
+      message: "تم ترقية حساب الضيف بنجاح.",
       token,
       user: {
         id: updatedUser.id,
+        publicId: updatedUser.publicId,
         email: updatedUser.email,
         username: updatedUser.username,
+        displayNickname: updatedUser.displayNickname,
         role: updatedUser.role,
         avatar: updatedUser.avatar,
-        referralCode: updatedUser.referralCode
+        referralCode: updatedUser.referralCode,
+        isGuest: false
       }
     });
   } catch (error) {
     console.error("Link account error:", error);
-    return res.status(500).json({ error: "Failed to link guest account." });
+    return res.status(500).json({ error: "فشل ربط حساب الضيف." });
   }
 });
 
-// 5. Password Recovery Request
+// 5. Password Recovery
 router.post("/recover-password", async (req, res): Promise<any> => {
   const { email } = req.body;
   if (!email) {
-    return res.status(400).json({ error: "Email is required." });
+    return res.status(400).json({ error: "البريد الإلكتروني مطلوب." });
   }
   
-  // Simulated success response
+  // Return mock code verify token success
   return res.json({
-    message: "If the email is registered, password recovery instructions have been sent."
+    message: "تم إرسال رمز تحقق استعادة الحساب إلى بريدك الإلكتروني.",
+    verificationCode: "777777" // Standard mock verification code
   });
+});
+
+// 6. Reset password via recovery code
+router.post("/reset-password", async (req, res): Promise<any> => {
+  const { email, code, newPassword } = req.body;
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ error: "الحقول مطلوبة." });
+  }
+
+  if (code !== "777777") {
+    return res.status(400).json({ error: "رمز التحقق غير صحيح." });
+  }
+
+  try {
+    const user = await prisma.user.findFirst({ where: { email } });
+    if (!user) {
+      return res.status(404).json({ error: "الحساب غير موجود." });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash }
+    });
+
+    await prisma.eventLog.create({
+      data: {
+        eventType: "USER_RESET_PASSWORD",
+        userId: user.id,
+        message: `Reset password for user ${user.publicId} via verification code`
+      }
+    });
+
+    return res.json({ message: "تم تغيير كلمة المرور بنجاح. يمكنك الدخول الآن." });
+  } catch (error) {
+    return res.status(500).json({ error: "فشل إعادة تعيين كلمة المرور." });
+  }
 });
 
 export default router;
