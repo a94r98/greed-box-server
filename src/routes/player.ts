@@ -177,6 +177,7 @@ router.get("/rankings", authenticateToken, async (req: AuthenticatedRequest, res
         username: u?.username || "Player",
         displayNickname: u?.displayNickname || u?.username || "لاعب",
         avatar: u?.avatar || "avatar_1",
+        gender: u?.gender || "MALE",
         value: item.totalWagered
       };
     });
@@ -202,6 +203,7 @@ router.get("/rankings", authenticateToken, async (req: AuthenticatedRequest, res
         displayNickname: u?.displayNickname || u?.username || "أنت",
         publicId: u?.publicId || "",
         avatar: u?.avatar || "avatar_1",
+        gender: u?.gender || "MALE",
         coinsToRank99
       };
     }
