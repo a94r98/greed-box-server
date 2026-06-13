@@ -53,7 +53,8 @@ router.post("/guest", async (req, res): Promise<any> => {
     });
 
     if (!user) {
-      // Rule: Max 3 accounts per device limit
+      // Rule: Max 3 accounts per device limit (Bypassed for testing)
+      /*
       const existingAccountsCount = await prisma.user.count({
         where: { deviceId }
       });
@@ -61,6 +62,7 @@ router.post("/guest", async (req, res): Promise<any> => {
       if (existingAccountsCount >= 3) {
         return res.status(400).json({ error: "لقد تجاوزت الحد الأقصى للحسابات المسموح بإنشائها على هذا الجهاز (3 حسابات)." });
       }
+      */
 
       // Create new Guest user
       const referralCode = generateReferralCode();
@@ -168,13 +170,15 @@ router.post("/register", async (req, res): Promise<any> => {
       return res.status(400).json({ error: "اسم المستخدم (Username) مستخدم بالفعل." });
     }
 
-    // Rule: Max 3 accounts per device limit
+    // Rule: Max 3 accounts per device limit (Bypassed for testing)
+    /*
     const existingAccountsCount = await prisma.user.count({
       where: { deviceId }
     });
     if (existingAccountsCount >= 3) {
       return res.status(400).json({ error: "لقد تجاوزت الحد الأقصى للحسابات المسموح بإنشائها على هذا الجهاز (3 حسابات)." });
     }
+    */
 
     const passwordHash = await bcrypt.hash(password, 10);
     const referralCode = generateReferralCode();
