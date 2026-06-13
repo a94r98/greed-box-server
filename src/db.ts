@@ -309,9 +309,7 @@ export async function initializeDatabase() {
       console.log("✅ SuperAdmin created.");
     }
 
-    // Reset all test wallets
-    await runQuery(`UPDATE "Wallet" SET "freeBalance"=1000000,"cashBalance"=100000,"updatedAt"=NOW()`);
-    console.log("✅ Test wallets reset.");
+    // NOTE: Wallet balances are NOT reset on startup to preserve real user data.
 
     console.log("🎉 Database initialization complete!");
   } catch (error) {
