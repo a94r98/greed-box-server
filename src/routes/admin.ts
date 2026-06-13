@@ -77,7 +77,7 @@ router.get("/users", async (req: AuthenticatedRequest, res: Response) => {
 // Update user details (Name, Age, Gender, password, publicId, Ban options)
 router.put("/users/:id", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
   const userId = req.params.id;
-  const { displayNickname, age, gender, password, publicId, isBanned, banDays, banReason, removeAvatar } = req.body;
+  const { displayNickname, age, gender, password, publicId, isBanned, banDays, banReason, removeAvatar, phoneNumber, countryCode } = req.body;
 
   try {
     const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -88,6 +88,8 @@ router.put("/users/:id", async (req: AuthenticatedRequest, res: Response): Promi
     if (displayNickname !== undefined) updateData.displayNickname = displayNickname;
     if (age !== undefined) updateData.age = age ? parseInt(age) : null;
     if (gender !== undefined) updateData.gender = gender;
+    if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber || null;
+    if (countryCode !== undefined) updateData.countryCode = countryCode || null;
     
     if (removeAvatar) {
       updateData.avatar = "avatar_1";

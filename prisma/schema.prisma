@@ -23,6 +23,9 @@ model User {
   avatar             String                  @default("avatar_1")
   age                Int?
   gender             String?                 // MALE, FEMALE
+  phoneNumber        String?                 // Phone number without country code
+  countryCode        String?                 // e.g. +964, +966, +971
+  lastLoginAt        DateTime?               // Last login timestamp
   createdAt          DateTime                @default(now())
   roundsPlayed       Int                     @default(0)
   roundsWon          Int                     @default(0)
