@@ -29,6 +29,8 @@ model User {
   createdAt          DateTime                @default(now())
   roundsPlayed       Int                     @default(0)
   roundsWon          Int                     @default(0)
+  badge              String?
+  isVerified         Boolean                 @default(false)
   
   // Ban fields
   isBanned           Boolean                 @default(false)
@@ -151,6 +153,9 @@ model DailyTask {
   rewardAmount   Float
   rewardCurrency String         // FREE, CASH
   isEnabled      Boolean        @default(true)
+  type           String         @default("DAILY") // DAILY, ONETIME, SOCIAL
+  actionType     String?
+  linkUrl        String?
   progress       TaskProgress[]
 }
 

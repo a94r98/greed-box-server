@@ -31,7 +31,7 @@ async function generateUniquePublicId(): Promise<string> {
 
 // 1. Guest Authentication / Registration (Multi-account checking, Device ID Banning, 8-digit ID)
 router.post("/guest", async (req, res): Promise<any> => {
-  const { deviceId, fingerprint } = req.body;
+  const { deviceId, fingerprint, avatar } = req.body;
   if (!deviceId) {
     return res.status(400).json({ error: "Device ID is required." });
   }
@@ -73,7 +73,8 @@ router.post("/guest", async (req, res): Promise<any> => {
           deviceId,
           role: "GUEST",
           referralCode,
-          username: `guest_${publicId}`
+          username: `guest_${publicId}`,
+          avatar: avatar || 'avatar_1',
         }
       });
 
@@ -138,7 +139,7 @@ router.post("/guest", async (req, res): Promise<any> => {
 
 // 2. Email Registration (Age limit, device account limit, 8-digit unique ID)
 router.post("/register", async (req, res): Promise<any> => {
-  const { email, password, username, displayNickname, age, gender, deviceId, refCode } = req.body;
+  const { email, password, username, displayNickname, age, gender, avatar, deviceId, refCode } = req.body;
   if (!email || !password || !deviceId || !username) {
     return res.status(400).json({ error: "جميع الحقول المطلوبة يجب ملؤها." });
   }
@@ -204,6 +205,7 @@ router.post("/register", async (req, res): Promise<any> => {
           displayNickname: displayNickname || username,
           age: age ? parseInt(age) : null,
           gender,
+          avatar: avatar || 'avatar_1',
           deviceId,
           role: "USER",
           referralCode,
@@ -232,6 +234,24 @@ router.post("/register", async (req, res): Promise<any> => {
 
       return newUser;
     });
+
+    // ─── TASK SYSTEM TRIGGERS ──────────────────────────────────────────────
+    try {
+      const { trackTaskProgress } = require("../taskTracker");
+      await trackTaskProgress(user.id, "CREATE_ACCOUNT", 1);
+      if (email) {
+        await trackTaskProgress(user.id, "PROFILE_EMAIL", 1);
+      }
+      if (refCode) {
+        const inviter = await prisma.user.findUnique({ where: { referralCode: refCode } });
+        if (inviter) {
+          await trackTaskProgress(inviter.id, "INVITE_FRIEND", 1);
+          await trackTaskProgress(inviter.id, "INVITE_FRIENDS_TOTAL", 1);
+        }
+      }
+    } catch (taskErr) {
+      console.error("Error updating tasks on registration:", taskErr);
+    }
 
     await prisma.eventLog.create({
       data: {
@@ -393,6 +413,15 @@ router.post("/link", authenticateToken, async (req: AuthenticatedRequest, res: R
         message: `Linked guest account ${updatedUser.publicId} to email ${email}`
       }
     });
+
+    // ─── TASK SYSTEM TRIGGERS ──────────────────────────────────────────────
+    try {
+      const { trackTaskProgress } = require("../taskTracker");
+      await trackTaskProgress(updatedUser.id, "CREATE_ACCOUNT", 1);
+      await trackTaskProgress(updatedUser.id, "PROFILE_EMAIL", 1);
+    } catch (taskErr) {
+      console.error("Error updating tasks on guest upgrade:", taskErr);
+    }
 
     const token = jwt.sign(
       { id: updatedUser.id, email: updatedUser.email, role: updatedUser.role, deviceId: updatedUser.deviceId },

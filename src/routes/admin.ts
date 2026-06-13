@@ -7,6 +7,7 @@ import { AuthenticatedRequest, authenticateToken, requireAdmin, requireSuperAdmi
 import gameEngine from "../gameEngine";
 import { logEvent } from "../auditLogger";
 import { EventType } from "../constants";
+import { trackTaskProgress } from "../taskTracker";
 
 const router = Router();
 
@@ -77,7 +78,7 @@ router.get("/users", async (req: AuthenticatedRequest, res: Response) => {
 // Update user details (Name, Age, Gender, password, publicId, Ban options)
 router.put("/users/:id", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
   const userId = req.params.id;
-  const { displayNickname, age, gender, password, publicId, isBanned, banDays, banReason, removeAvatar, phoneNumber, countryCode } = req.body;
+  const { displayNickname, age, gender, password, publicId, isBanned, banDays, banReason, removeAvatar, phoneNumber, countryCode, isVerified } = req.body;
 
   try {
     const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -93,6 +94,10 @@ router.put("/users/:id", async (req: AuthenticatedRequest, res: Response): Promi
     
     if (removeAvatar) {
       updateData.avatar = "avatar_1";
+    }
+
+    if (isVerified !== undefined) {
+      updateData.isVerified = isVerified;
     }
 
     if (password) {
@@ -158,6 +163,14 @@ router.put("/users/:id", async (req: AuthenticatedRequest, res: Response): Promi
       where: { id: userId },
       data: updateData
     });
+
+    if (isVerified === true && !user.isVerified) {
+      try {
+        await trackTaskProgress(userId, "PROFILE_VERIFY", 1);
+      } catch (taskErr) {
+        console.error("Error triggering verification task:", taskErr);
+      }
+    }
 
     const wallet = await prisma.wallet.findUnique({ where: { userId } });
     const userWithWallet = {
@@ -463,24 +476,17 @@ router.post("/deposits/:id/approve", async (req: AuthenticatedRequest, res: Resp
         }
       });
 
-      // Record daily task progress for 'first_deposit'
-      const depositTask = await tx.dailyTask.findUnique({ where: { key: "first_deposit" } });
-      if (depositTask) {
-        const progress = await tx.taskProgress.findUnique({
-          where: { userId_taskId: { userId: deposit.userId, taskId: depositTask.id } }
-        });
-        if (!progress) {
-          await tx.taskProgress.create({
-            data: {
-              userId: deposit.userId,
-              taskId: depositTask.id,
-              count: 1,
-              isCompleted: true
-            }
-          });
-        }
-      }
+      // Task triggers run after transaction commits
     });
+
+    // ─── TASK SYSTEM TRIGGERS ──────────────────────────────────────────────
+    try {
+      await trackTaskProgress(deposit.userId, "DEPOSIT", 1);
+      await trackTaskProgress(deposit.userId, "FIRST_DEPOSIT", 1);
+      await trackTaskProgress(deposit.userId, "DEPOSIT_TOTAL_AMOUNT", Math.round(deposit.amount));
+    } catch (taskErr) {
+      console.error("Error updating tasks on deposit approval:", taskErr);
+    }
 
     await logEvent({
       eventType: EventType.SYSTEM_ALERT,
@@ -705,34 +711,77 @@ router.get("/pool/logs", async (req, res) => {
   }
 });
 
-// 8. Daily Tasks admin CRUD
+// 8. Tasks admin CRUD (Daily, achievements, social)
 router.get("/tasks", async (req, res) => {
-  const tasks = await prisma.dailyTask.findMany();
-  return res.json({ tasks });
+  try {
+    const tasks = await prisma.dailyTask.findMany();
+    // Get completion counts group by taskId
+    const completions = await prisma.taskProgress.groupBy({
+      by: ["taskId"],
+      _count: {
+        id: true
+      },
+      where: {
+        isCompleted: true
+      }
+    });
+
+    const tasksWithCompletions = tasks.map(task => {
+      const comp = completions.find(c => c.taskId === task.id);
+      return {
+        ...task,
+        completionsCount: comp?._count.id || 0
+      };
+    });
+
+    return res.json({ tasks: tasksWithCompletions });
+  } catch (error) {
+    console.error("Failed to load admin tasks:", error);
+    return res.status(500).json({ error: "Failed to load tasks." });
+  }
 });
 
 router.post("/tasks", requireSuperAdmin, async (req, res) => {
-  const { key, title, description, goalCount, rewardAmount, rewardCurrency } = req.body;
+  const { key, title, description, goalCount, rewardAmount, rewardCurrency, type, actionType, linkUrl } = req.body;
   try {
     const task = await prisma.dailyTask.create({
-      data: { key, title, description, goalCount, rewardAmount, rewardCurrency }
+      data: {
+        key,
+        title,
+        description,
+        goalCount: parseInt(goalCount),
+        rewardAmount: parseFloat(rewardAmount),
+        rewardCurrency,
+        type: type || "DAILY",
+        actionType: actionType || null,
+        linkUrl: linkUrl || null
+      }
     });
     return res.status(201).json({ task });
   } catch (err) {
+    console.error("Create task error:", err);
     return res.status(500).json({ error: "Failed to create task." });
   }
 });
 
 router.put("/tasks/:id", requireSuperAdmin, async (req, res) => {
   const taskId = req.params.id;
-  const { title, description, goalCount, rewardAmount, rewardCurrency, isEnabled } = req.body;
+  const { title, description, goalCount, rewardAmount, rewardCurrency, isEnabled, type, actionType, linkUrl } = req.body;
   try {
+    const updateData: any = { title, description, rewardCurrency, isEnabled };
+    if (goalCount !== undefined) updateData.goalCount = parseInt(goalCount);
+    if (rewardAmount !== undefined) updateData.rewardAmount = parseFloat(rewardAmount);
+    if (type !== undefined) updateData.type = type;
+    if (actionType !== undefined) updateData.actionType = actionType || null;
+    if (linkUrl !== undefined) updateData.linkUrl = linkUrl || null;
+
     const task = await prisma.dailyTask.update({
       where: { id: taskId },
-      data: { title, description, goalCount, rewardAmount, rewardCurrency, isEnabled }
+      data: updateData
     });
     return res.json({ task });
   } catch (err) {
+    console.error("Update task error:", err);
     return res.status(500).json({ error: "Failed to update task." });
   }
 });
@@ -744,6 +793,20 @@ router.delete("/tasks/:id", requireSuperAdmin, async (req, res) => {
     return res.json({ message: "Task deleted successfully." });
   } catch (err) {
     return res.status(500).json({ error: "Failed to delete task." });
+  }
+});
+
+// Reset task for all players
+router.post("/tasks/:id/reset", async (req, res) => {
+  const taskId = req.params.id;
+  try {
+    await prisma.taskProgress.deleteMany({
+      where: { taskId }
+    });
+    return res.json({ message: "تم إعادة تعيين المهمة لجميع اللاعبين بنجاح." });
+  } catch (error) {
+    console.error("Failed to reset task:", error);
+    return res.status(500).json({ error: "Failed to reset task." });
   }
 });
 

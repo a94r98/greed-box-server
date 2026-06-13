@@ -2,6 +2,7 @@ import { Router, Response } from "express";
 import { prisma } from "../db";
 import { AuthenticatedRequest, authenticateToken, restrictGuest } from "../authMiddleware";
 import gameEngine from "../gameEngine";
+import { trackTaskProgress } from "../taskTracker";
 
 const router = Router();
 
@@ -219,7 +220,7 @@ router.get("/rankings", authenticateToken, async (req: AuthenticatedRequest, res
   }
 });
 
-// 5. Daily Tasks List & Progress
+// 5. Daily Tasks List & Progress (Categorized & Lazy-Reset)
 router.get("/tasks", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
   const userId = req.user?.id;
   if (!userId) return res.status(400).json({ error: "Unauthorized." });
@@ -233,8 +234,32 @@ router.get("/tasks", authenticateToken, async (req: AuthenticatedRequest, res: R
       where: { userId }
     });
 
+    const now = new Date();
+    const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+
+    // Process lazy-resets for daily tasks on retrieval
+    const updatedProgressList = [...progressList];
+    for (let i = 0; i < updatedProgressList.length; i++) {
+      const p = updatedProgressList[i];
+      const task = tasks.find(t => t.id === p.taskId);
+      if (task && task.type === "DAILY") {
+        const progressDate = new Date(p.updatedAt);
+        if (progressDate < todayStart) {
+          const resetProgress = await prisma.taskProgress.update({
+            where: { id: p.id },
+            data: {
+              count: 0,
+              isCompleted: false,
+              claimedAt: null
+            }
+          });
+          updatedProgressList[i] = resetProgress;
+        }
+      }
+    }
+
     const response = tasks.map(task => {
-      let progress = progressList.find(p => p.taskId === task.id);
+      let progress = updatedProgressList.find(p => p.taskId === task.id);
       return {
         id: task.id,
         key: task.key,
@@ -243,6 +268,9 @@ router.get("/tasks", authenticateToken, async (req: AuthenticatedRequest, res: R
         goalCount: task.goalCount,
         rewardAmount: task.rewardAmount,
         rewardCurrency: task.rewardCurrency,
+        type: task.type,
+        actionType: task.actionType,
+        linkUrl: task.linkUrl,
         count: progress?.count || 0,
         isCompleted: progress?.isCompleted || false,
         isClaimed: progress?.claimedAt !== null && progress?.claimedAt !== undefined
@@ -251,15 +279,45 @@ router.get("/tasks", authenticateToken, async (req: AuthenticatedRequest, res: R
 
     return res.json({ tasks: response });
   } catch (error) {
-    return res.status(500).json({ error: "Failed to load daily tasks." });
+    console.error("Failed to load tasks:", error);
+    return res.status(500).json({ error: "Failed to load tasks." });
   }
 });
 
-// 6. Claim Daily Task Reward
-router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+// 5.1 Play Heartbeat (Periodic Online Minutes tracker)
+router.post("/tasks/heartbeat", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
   const userId = req.user?.id;
-  const taskId = req.params.id;
+  if (!userId) return res.status(400).json({ error: "Unauthorized." });
 
+  try {
+    await trackTaskProgress(userId, "ONLINE_MINUTES", 1);
+    return res.json({ success: true, message: "Heartbeat recorded." });
+  } catch (error) {
+    console.error("Heartbeat error:", error);
+    return res.status(500).json({ error: "Heartbeat failed." });
+  }
+});
+
+// 5.2 Social Action Trigger
+router.post("/tasks/action", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.user?.id;
+  const { actionType } = req.body;
+  if (!userId) return res.status(400).json({ error: "Unauthorized." });
+  if (!actionType) return res.status(400).json({ error: "Action type is required." });
+
+  try {
+    await trackTaskProgress(userId, actionType, 1);
+    return res.json({ success: true, message: `Action ${actionType} recorded.` });
+  } catch (error) {
+    console.error("Action trigger error:", error);
+    return res.status(500).json({ error: "Failed to record action." });
+  }
+});
+
+// 6. Claim Task Reward (Handles cumulative check and badges)
+router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const taskId = req.params.id;
+  const userId = req.user?.id;
   if (!userId) return res.status(400).json({ error: "Unauthorized." });
 
   try {
@@ -271,6 +329,53 @@ router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequ
     if (!progress) {
       return res.status(404).json({ error: "Task progress not found." });
     }
+    
+    // Check daily task lazy reset before checking completion status
+    const now = new Date();
+    const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    if (progress.task.type === "DAILY") {
+      const progressDate = new Date(progress.updatedAt);
+      if (progressDate < todayStart) {
+        return res.status(400).json({ error: "Task is not completed yet." });
+      }
+    }
+
+    // Dynamic verification for "complete_all_daily"
+    if (progress.task.key === "complete_all_daily") {
+      const otherDailyTasks = await prisma.dailyTask.findMany({
+        where: {
+          type: "DAILY",
+          key: { not: "complete_all_daily" },
+          isEnabled: true
+        }
+      });
+
+      const otherProgress = await prisma.taskProgress.findMany({
+        where: { userId }
+      });
+
+      let allCompleted = true;
+      for (const t of otherDailyTasks) {
+        const p = otherProgress.find(op => op.taskId === t.id);
+        if (!p) {
+          allCompleted = false;
+          break;
+        }
+        const progressDate = new Date(p.updatedAt);
+        if (progressDate < todayStart || !p.isCompleted) {
+          allCompleted = false;
+          break;
+        }
+      }
+
+      if (!allCompleted) {
+        return res.status(400).json({ error: "يجب إكمال جميع المهام اليومية الأخرى أولاً للحصول على هذه المكافأة." });
+      }
+
+      // Temporarily mark completed so the claim proceeds
+      progress.isCompleted = true;
+    }
+
     if (!progress.isCompleted) {
       return res.status(400).json({ error: "Task is not completed yet." });
     }
@@ -289,7 +394,7 @@ router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequ
         data: { claimedAt: new Date() }
       });
 
-      // Credit wallet
+      // Credit wallet (freeBalance = diamonds, cashBalance = coins)
       const wallet = await tx.wallet.findUnique({ where: { userId } });
       if (wallet) {
         const balanceData = currency === "FREE"
@@ -309,9 +414,17 @@ router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequ
           amount: rewardAmount,
           currency,
           type: "DAILY_TASK_BONUS",
-          description: `Claimed Daily Task Reward: ${progress.task.title}`
+          description: `Claimed Task Reward: ${progress.task.title}`
         }
       });
+
+      // Assign badge if claiming join all official pages
+      if (progress.task.key === "social_join_all") {
+        await tx.user.update({
+          where: { id: userId },
+          data: { badge: "عضو داعم" }
+        });
+      }
     });
 
     return res.json({

@@ -222,6 +222,19 @@ export class GameEngine {
       return bet;
     });
 
+    // ─── TASK SYSTEM TRIGGERS ──────────────────────────────────────────────
+    try {
+      const { trackTaskProgress } = require("./taskTracker");
+      if (this.currentCurrencyMode === "FREE") {
+        await trackTaskProgress(userId, "USE_DIAMONDS", 1);
+      } else {
+        await trackTaskProgress(userId, "BET_COINS", Math.round(amount));
+        await trackTaskProgress(userId, "FIRST_BET", 1);
+      }
+    } catch (taskErr) {
+      console.error("Error updating tasks on bet placement:", taskErr);
+    }
+
     // Cache locally
     const activeBet: ActiveBet = {
       userId,
@@ -628,6 +641,65 @@ export class GameEngine {
           });
         }
       });
+
+      // ─── TASK SYSTEM TRIGGERS ──────────────────────────────────────────────
+      try {
+        const roundBets = await prisma.bet.findMany({
+          where: { roundId: this.currentRoundId }
+        });
+
+        const playerSummaries: Record<string, {
+          totalBet: number;
+          totalWin: number;
+          hasWin: boolean;
+          maxMultiplier: number;
+        }> = {};
+
+        for (const b of roundBets) {
+          if (!playerSummaries[b.userId]) {
+            playerSummaries[b.userId] = {
+              totalBet: 0,
+              totalWin: 0,
+              hasWin: false,
+              maxMultiplier: 0
+            };
+          }
+          const summary = playerSummaries[b.userId];
+          summary.totalBet += b.amount;
+          if (b.status === "WON") {
+            summary.totalWin += b.winAmount;
+            summary.hasWin = true;
+            if (this.currentWinningMultiplier && this.currentWinningMultiplier > summary.maxMultiplier) {
+              summary.maxMultiplier = this.currentWinningMultiplier;
+            }
+          }
+        }
+
+        const { trackTaskProgress } = require("./taskTracker");
+
+        for (const [userId, summary] of Object.entries(playerSummaries)) {
+          await trackTaskProgress(userId, "PLAY_ROUNDS", 1);
+          await trackTaskProgress(userId, "PLAY_ROUNDS_TOTAL", 1);
+
+          if (summary.hasWin) {
+            await trackTaskProgress(userId, "WIN_ROUNDS", 1);
+            await trackTaskProgress(userId, "FIRST_WIN", 1);
+
+            if (!isFree) {
+              const netProfit = summary.totalWin - summary.totalBet;
+              if (netProfit > 0) {
+                await trackTaskProgress(userId, "WIN_PROFIT_TOTAL", Math.round(netProfit));
+              }
+            }
+
+            if (summary.maxMultiplier >= 45) {
+              await trackTaskProgress(userId, "WIN_WITH_45X", 1);
+            }
+          }
+        }
+      } catch (taskErr) {
+        console.error("Error updating tasks on round end:", taskErr);
+      }
 
       console.log(`[Round Engine] Completed payouts. Total Bets: ${totalBetsVolume}, Total Winnings Paid: ${totalPayout}`);
       

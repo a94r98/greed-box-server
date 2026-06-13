@@ -4,7 +4,7 @@
   "description": "Real-time game backend server for Greed Boxes",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "prisma generate && tsc",
     "start": "node --dns-result-order=ipv4first dist/server.js",
     "dev": "NODE_OPTIONS=--dns-result-order=ipv4first tsnd --respawn --transpile-only src/server.ts",
     "prisma:generate": "prisma generate",
