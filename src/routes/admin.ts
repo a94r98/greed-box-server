@@ -715,22 +715,20 @@ router.get("/pool/logs", async (req, res) => {
 router.get("/tasks", async (req, res) => {
   try {
     const tasks = await prisma.dailyTask.findMany();
-    // Get completion counts group by taskId
-    const completions = await prisma.taskProgress.groupBy({
-      by: ["taskId"],
-      _count: {
-        id: true
-      },
-      where: {
-        isCompleted: true
-      }
-    });
+    // Get completion counts via raw SQL query to avoid mock groupBy limitations
+    const completions = await prisma.$queryRaw`
+      SELECT "taskId", COUNT(id) as "count"
+      FROM "TaskProgress"
+      WHERE "isCompleted" = true
+      GROUP BY "taskId"
+    `;
 
     const tasksWithCompletions = tasks.map(task => {
-      const comp = completions.find(c => c.taskId === task.id);
+      const comp = completions.find((c: any) => c.taskId === task.id);
+      const countVal = comp ? parseInt(comp.count || "0") : 0;
       return {
         ...task,
-        completionsCount: comp?._count.id || 0
+        completionsCount: countVal
       };
     });
 
