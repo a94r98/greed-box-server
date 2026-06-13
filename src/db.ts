@@ -271,6 +271,9 @@ export async function initializeDatabase() {
       { key: "social_join_all",        title: "الانضمام لجميع صفحات التطبيق الرسمية",description: "(فيسبوك + إنستغرام + تيك توك + واتساب + تلغرام)",goalCount: 5,     rewardAmount: 15000, rewardCurrency: "FREE", type: "SOCIAL", actionType: "SOCIAL_JOIN_ALL", linkUrl: null }
     ];
 
+    // Delete any old english tasks from previous database schemas
+    await runQuery(`DELETE FROM "DailyTask" WHERE key IN ('play_5_rounds', 'play_20_rounds', 'invite_friend')`);
+
     for (const t of tasks) {
       await runQuery(
         `INSERT INTO "DailyTask" (id,key,title,description,"goalCount","rewardAmount","rewardCurrency","isEnabled",type,"actionType","linkUrl")

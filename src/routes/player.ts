@@ -321,59 +321,112 @@ router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequ
   if (!userId) return res.status(400).json({ error: "Unauthorized." });
 
   try {
-    const progress = await prisma.taskProgress.findUnique({
+    const now = new Date();
+    const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+
+    let progress = await prisma.taskProgress.findUnique({
       where: { userId_taskId: { userId, taskId } },
       include: { task: true }
     });
 
     if (!progress) {
-      return res.status(404).json({ error: "Task progress not found." });
-    }
-    
-    // Check daily task lazy reset before checking completion status
-    const now = new Date();
-    const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-    if (progress.task.type === "DAILY") {
-      const progressDate = new Date(progress.updatedAt);
-      if (progressDate < todayStart) {
-        return res.status(400).json({ error: "Task is not completed yet." });
-      }
-    }
-
-    // Dynamic verification for "complete_all_daily"
-    if (progress.task.key === "complete_all_daily") {
-      const otherDailyTasks = await prisma.dailyTask.findMany({
-        where: {
-          type: "DAILY",
-          key: { not: "complete_all_daily" },
-          isEnabled: true
-        }
-      });
-
-      const otherProgress = await prisma.taskProgress.findMany({
-        where: { userId }
-      });
-
-      let allCompleted = true;
-      for (const t of otherDailyTasks) {
-        const p = otherProgress.find(op => op.taskId === t.id);
-        if (!p) {
-          allCompleted = false;
-          break;
-        }
-        const progressDate = new Date(p.updatedAt);
-        if (progressDate < todayStart || !p.isCompleted) {
-          allCompleted = false;
-          break;
-        }
+      const task = await prisma.dailyTask.findUnique({ where: { id: taskId } });
+      if (!task) {
+        return res.status(404).json({ error: "Task not found." });
       }
 
-      if (!allCompleted) {
-        return res.status(400).json({ error: "يجب إكمال جميع المهام اليومية الأخرى أولاً للحصول على هذه المكافأة." });
+      if (task.key === "complete_all_daily") {
+        const otherDailyTasks = await prisma.dailyTask.findMany({
+          where: {
+            type: "DAILY",
+            key: { not: "complete_all_daily" },
+            isEnabled: true
+          }
+        });
+
+        const otherProgress = await prisma.taskProgress.findMany({
+          where: { userId }
+        });
+
+        let allCompleted = true;
+        for (const t of otherDailyTasks) {
+          const p = otherProgress.find(op => op.taskId === t.id);
+          if (!p) {
+            allCompleted = false;
+            break;
+          }
+          const progressDate = new Date(p.updatedAt);
+          if (progressDate < todayStart || !p.isCompleted) {
+            allCompleted = false;
+            break;
+          }
+        }
+
+        if (!allCompleted) {
+          return res.status(400).json({ error: "يجب إكمال جميع المهام اليومية الأخرى أولاً للحصول على هذه المكافأة." });
+        }
+
+        progress = await prisma.taskProgress.create({
+          data: {
+            userId,
+            taskId: task.id,
+            count: otherDailyTasks.length,
+            isCompleted: true
+          },
+          include: { task: true }
+        });
+      } else {
+        return res.status(404).json({ error: "Task progress not found." });
+      }
+    } else {
+      // Check daily task lazy reset before checking completion status
+      if (progress.task.type === "DAILY") {
+        const progressDate = new Date(progress.updatedAt);
+        if (progressDate < todayStart) {
+          return res.status(400).json({ error: "Task is not completed yet." });
+        }
       }
 
-      // Temporarily mark completed so the claim proceeds
-      progress.isCompleted = true;
+      // Dynamic verification for "complete_all_daily" if progress exists
+      if (progress.task.key === "complete_all_daily") {
+        const otherDailyTasks = await prisma.dailyTask.findMany({
+          where: {
+            type: "DAILY",
+            key: { not: "complete_all_daily" },
+            isEnabled: true
+          }
+        });
+
+        const otherProgress = await prisma.taskProgress.findMany({
+          where: { userId }
+        });
+
+        let allCompleted = true;
+        for (const t of otherDailyTasks) {
+          const p = otherProgress.find(op => op.taskId === t.id);
+          if (!p) {
+            allCompleted = false;
+            break;
+          }
+          const progressDate = new Date(p.updatedAt);
+          if (progressDate < todayStart || !p.isCompleted) {
+            allCompleted = false;
+            break;
+          }
+        }
+
+        if (!allCompleted) {
+          return res.status(400).json({ error: "يجب إكمال جميع المهام اليومية الأخرى أولاً للحصول على هذه المكافأة." });
+        }
+
+        if (!progress.isCompleted) {
+          progress = await prisma.taskProgress.update({
+            where: { id: progress.id },
+            data: { isCompleted: true },
+            include: { task: true }
+          });
+        }
+      }
     }
 
     if (!progress.isCompleted) {
