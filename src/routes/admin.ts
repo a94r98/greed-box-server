@@ -30,10 +30,12 @@ router.get("/stats", async (req: AuthenticatedRequest, res: Response) => {
     const today = new Date();
     today.setHours(0,0,0,0);
 
-    const todayCashRevenue = await prisma.housePoolLog.aggregate({
-      where: { poolType: "CASH", createdAt: { gte: today } },
-      _sum: { amountChange: true }
-    });
+    const todayCashRevenueRows = await prisma.$queryRaw`
+      SELECT SUM("amountChange") as sum
+      FROM "HousePoolLog"
+      WHERE "poolType" = 'CASH' AND "createdAt" >= ${today}
+    `;
+    const todayCashRevenueVal = todayCashRevenueRows[0]?.sum ? parseFloat(todayCashRevenueRows[0].sum) : 0.0;
 
     return res.json({
       activeRound,
@@ -47,7 +49,7 @@ router.get("/stats", async (req: AuthenticatedRequest, res: Response) => {
         pendingWithdrawals
       },
       revenue: {
-        todayCash: todayCashRevenue._sum.amountChange || 0
+        todayCash: todayCashRevenueVal
       }
     });
   } catch (err) {
@@ -164,6 +166,21 @@ router.put("/users/:id", async (req: AuthenticatedRequest, res: Response): Promi
       data: updateData
     });
 
+    if (isBanned === true) {
+      try {
+        const io = gameEngine.getIo();
+        if (io) {
+          io.to(`user:${userId}`).emit("kick_out", { reason: "account_banned" });
+          const activeSockets = await io.in(`user:${userId}`).fetchSockets();
+          for (const s of activeSockets) {
+            s.disconnect(true);
+          }
+        }
+      } catch (wsErr) {
+        console.error("Failed to disconnect user sockets on ban:", wsErr);
+      }
+    }
+
     if (isVerified === true && !user.isVerified) {
       try {
         await trackTaskProgress(userId, "PROFILE_VERIFY", 1);
@@ -212,6 +229,20 @@ router.post("/users/:id/ban-device", requireSuperAdmin, async (req: Authenticate
         message: `BANNED DEVICE ID: [${user.deviceId}] | Reason: ${reason || "Violating terms"} | Executed by SuperAdmin: ${req.user?.id}`
       }
     });
+
+    // Disconnect user's active sockets immediately
+    try {
+      const io = gameEngine.getIo();
+      if (io) {
+        io.to(`user:${userId}`).emit("kick_out", { reason: "device_banned" });
+        const activeSockets = await io.in(`user:${userId}`).fetchSockets();
+        for (const s of activeSockets) {
+          s.disconnect(true);
+        }
+      }
+    } catch (wsErr) {
+      console.error("Failed to disconnect user sockets on device ban:", wsErr);
+    }
 
     return res.json({ message: "تم حظر الحساب والجهاز الخاص به نهائياً بنجاح." });
   } catch (err) {
@@ -292,6 +323,16 @@ router.put("/users/:id/balance", async (req: AuthenticatedRequest, res: Response
         message: `Admin ${req.user?.id} updated user balance. Free Change=${updated.freeBalance - wallet.freeBalance}, Cash Change=${updated.cashBalance - wallet.cashBalance} (New Free=${updated.freeBalance}, New Cash=${updated.cashBalance}). Reason: ${reason}`
       }
     });
+
+    // Emit real-time wallet update event to the user's socket room
+    try {
+      gameEngine.getIo()?.to(`user:${userId}`).emit("wallet_update", {
+        freeBalance: updated.freeBalance,
+        cashBalance: updated.cashBalance
+      });
+    } catch (wsErr) {
+      console.error("Failed to emit wallet update socket:", wsErr);
+    }
 
     return res.json({ message: "Balances updated successfully.", wallet: updated });
   } catch (err) {
@@ -413,6 +454,22 @@ router.delete("/users/:id", requireSuperAdmin, async (req: AuthenticatedRequest,
       }
     });
 
+    // Disconnect user's active sockets immediately
+    try {
+      const io = gameEngine.getIo();
+      if (io) {
+        // Emit kick_out event to the user's private channel
+        io.to(`user:${userId}`).emit("kick_out", { reason: "account_deleted" });
+        // Fetch and force disconnect all user's active socket connections
+        const activeSockets = await io.in(`user:${userId}`).fetchSockets();
+        for (const s of activeSockets) {
+          s.disconnect(true);
+        }
+      }
+    } catch (wsErr) {
+      console.error("Failed to disconnect user sockets on deletion:", wsErr);
+    }
+
     return res.json({ message: "تم حذف حساب المستخدم نهائياً من قاعدة البيانات بنجاح." });
   } catch (err) {
     console.error("Failed to purge user:", err);
@@ -478,6 +535,19 @@ router.post("/deposits/:id/approve", async (req: AuthenticatedRequest, res: Resp
 
       // Task triggers run after transaction commits
     });
+
+    // Notify user client of real-time balance update
+    try {
+      const updatedWallet = await prisma.wallet.findUnique({ where: { userId: deposit.userId } });
+      if (updatedWallet) {
+        gameEngine.getIo()?.to(`user:${deposit.userId}`).emit("wallet_update", {
+          freeBalance: updatedWallet.freeBalance,
+          cashBalance: updatedWallet.cashBalance
+        });
+      }
+    } catch (wsErr) {
+      console.error("Failed to emit wallet update socket:", wsErr);
+    }
 
     // ─── TASK SYSTEM TRIGGERS ──────────────────────────────────────────────
     try {
@@ -613,6 +683,19 @@ router.post("/withdrawals/:id/reject", async (req: AuthenticatedRequest, res: Re
         }
       });
     });
+
+    // Notify user client of real-time balance update
+    try {
+      const updatedWallet = await prisma.wallet.findUnique({ where: { userId: withdrawal.userId } });
+      if (updatedWallet) {
+        gameEngine.getIo()?.to(`user:${withdrawal.userId}`).emit("wallet_update", {
+          freeBalance: updatedWallet.freeBalance,
+          cashBalance: updatedWallet.cashBalance
+        });
+      }
+    } catch (wsErr) {
+      console.error("Failed to emit wallet update socket:", wsErr);
+    }
 
     return res.json({ message: "Withdrawal request rejected and refunded." });
   } catch (err) {

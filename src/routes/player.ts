@@ -13,13 +13,16 @@ router.get("/profile", authenticateToken, async (req: AuthenticatedRequest, res:
 
   try {
     const user = await prisma.user.findUnique({
-      where: { id: userId },
-      include: { wallet: true }
+      where: { id: userId }
     });
 
     if (!user) {
       return res.status(404).json({ error: "User profile not found." });
     }
+
+    const wallet = await prisma.wallet.findUnique({
+      where: { userId }
+    });
 
     // Compute financial aggregates from transaction history
     const transactions = await prisma.transaction.findMany({
@@ -58,8 +61,8 @@ router.get("/profile", authenticateToken, async (req: AuthenticatedRequest, res:
         roundsPlayed: user.roundsPlayed,
         roundsWon: user.roundsWon,
         wallet: {
-          freeBalance: user.wallet?.freeBalance || 0.0,
-          cashBalance: user.wallet?.cashBalance || 0.0
+          freeBalance: wallet?.freeBalance || 0.0,
+          cashBalance: wallet?.cashBalance || 0.0
         },
         stats: {
           totalProfitFree,
@@ -105,31 +108,27 @@ router.get("/history", authenticateToken, async (req: AuthenticatedRequest, res:
 
   try {
     const total = await prisma.bet.count({ where: { userId } });
-    const bets = await prisma.bet.findMany({
-      where: { userId },
-      orderBy: { createdAt: "desc" },
-      take: limit,
-      skip: (page - 1) * limit,
-      include: {
-        round: {
-          select: {
-            winningBox: true,
-            winningMultiplier: true
-          }
-        }
-      }
-    });
+    const offset = (page - 1) * limit;
+    const bets = await prisma.$queryRaw`
+      SELECT b.id, b."roundId", b."boxIndex", b.amount, b.currency, b.status, b."winAmount", b."createdAt",
+             r."winningBox", r."winningMultiplier"
+      FROM "Bet" b
+      LEFT JOIN "Round" r ON b."roundId" = r.id
+      WHERE b."userId" = ${userId}
+      ORDER BY b."createdAt" DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `;
 
-    const formattedHistory = bets.map(b => ({
+    const formattedHistory = bets.map((b: any) => ({
       betId: b.id,
       roundId: b.roundId,
       boxIndex: b.boxIndex,
-      amount: b.amount,
+      amount: typeof b.amount === 'string' ? parseFloat(b.amount) : (b.amount || 0.0),
       currency: b.currency,
       status: b.status,
-      winAmount: b.winAmount,
-      winningBox: b.round?.winningBox,
-      winningMultiplier: b.round?.winningMultiplier,
+      winAmount: typeof b.winAmount === 'string' ? parseFloat(b.winAmount) : (b.winAmount || 0.0),
+      winningBox: b.winningBox,
+      winningMultiplier: typeof b.winningMultiplier === 'string' ? parseFloat(b.winningMultiplier) : b.winningMultiplier,
       createdAt: b.createdAt
     }));
 
@@ -324,17 +323,16 @@ router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequ
     const now = new Date();
     const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
-    let progress = await prisma.taskProgress.findUnique({
-      where: { userId_taskId: { userId, taskId } },
-      include: { task: true }
+    const task = await prisma.dailyTask.findUnique({ where: { id: taskId } });
+    if (!task) {
+      return res.status(404).json({ error: "Task not found." });
+    }
+
+    let progress = await prisma.taskProgress.findFirst({
+      where: { userId, taskId }
     });
 
     if (!progress) {
-      const task = await prisma.dailyTask.findUnique({ where: { id: taskId } });
-      if (!task) {
-        return res.status(404).json({ error: "Task not found." });
-      }
-
       if (task.key === "complete_all_daily") {
         const otherDailyTasks = await prisma.dailyTask.findMany({
           where: {
@@ -372,15 +370,14 @@ router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequ
             taskId: task.id,
             count: otherDailyTasks.length,
             isCompleted: true
-          },
-          include: { task: true }
+          }
         });
       } else {
         return res.status(404).json({ error: "Task progress not found." });
       }
     } else {
       // Check daily task lazy reset before checking completion status
-      if (progress.task.type === "DAILY") {
+      if (task.type === "DAILY") {
         const progressDate = new Date(progress.updatedAt);
         if (progressDate < todayStart) {
           return res.status(400).json({ error: "Task is not completed yet." });
@@ -388,7 +385,7 @@ router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequ
       }
 
       // Dynamic verification for "complete_all_daily" if progress exists
-      if (progress.task.key === "complete_all_daily") {
+      if (task.key === "complete_all_daily") {
         const otherDailyTasks = await prisma.dailyTask.findMany({
           where: {
             type: "DAILY",
@@ -422,8 +419,7 @@ router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequ
         if (!progress.isCompleted) {
           progress = await prisma.taskProgress.update({
             where: { id: progress.id },
-            data: { isCompleted: true },
-            include: { task: true }
+            data: { isCompleted: true }
           });
         }
       }
@@ -436,11 +432,11 @@ router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequ
       return res.status(400).json({ error: "Task reward has already been claimed." });
     }
 
-    const rewardAmount = progress.task.rewardAmount;
-    const currency = progress.task.rewardCurrency;
+    const rewardAmount = task.rewardAmount;
+    const currency = task.rewardCurrency;
 
     // Credit reward atomically
-    await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx: any) => {
       // Mark task claimed
       await tx.taskProgress.update({
         where: { id: progress.id },
@@ -467,12 +463,12 @@ router.post("/tasks/:id/claim", authenticateToken, async (req: AuthenticatedRequ
           amount: rewardAmount,
           currency,
           type: "DAILY_TASK_BONUS",
-          description: `Claimed Task Reward: ${progress.task.title}`
+          description: `Claimed Task Reward: ${task.title}`
         }
       });
 
       // Assign badge if claiming join all official pages
-      if (progress.task.key === "social_join_all") {
+      if (task.key === "social_join_all") {
         await tx.user.update({
           where: { id: userId },
           data: { badge: "عضو داعم" }
@@ -580,13 +576,15 @@ router.post("/withdrawal", authenticateToken, restrictGuest, async (req: Authent
 // 9. Get Recent 20 Rounds with Winners & Chest shapes details
 router.get("/rounds/recent", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
   try {
-    const rounds = await prisma.round.findMany({
-      where: { winningBox: { not: null } },
-      orderBy: { startAt: "desc" },
-      take: 20
-    });
+    const rounds = await prisma.$queryRaw`
+      SELECT * FROM "Round"
+      WHERE "winningBox" IS NOT NULL
+      ORDER BY "startAt" DESC
+      LIMIT 20
+    `;
     return res.json({ rounds });
   } catch (err) {
+    console.error("Failed to fetch recent rounds:", err);
     return res.status(500).json({ error: "Failed to fetch recent rounds." });
   }
 });
@@ -596,22 +594,23 @@ router.get("/rounds/:id", authenticateToken, async (req: AuthenticatedRequest, r
   const roundId = req.params.id;
   try {
     const round = await prisma.round.findUnique({
-      where: { id: roundId },
-      include: {
-        bets: {
-          where: { status: "WON" },
-          orderBy: { winAmount: "desc" },
-          take: 3,
-          include: { user: { select: { username: true, avatar: true } } }
-        }
-      }
+      where: { id: roundId }
     });
     if (!round) return res.status(404).json({ error: "Round not found." });
 
-    const topWinners = round.bets.map(b => ({
-      username: b.user.username || "لاعب",
-      avatar: b.user.avatar || "avatar_1",
-      winAmount: b.winAmount
+    const topWinnersRows = await prisma.$queryRaw`
+      SELECT b."winAmount", u.username, u.avatar
+      FROM "Bet" b
+      JOIN "User" u ON b."userId" = u.id
+      WHERE b."roundId" = ${roundId} AND b.status = 'WON'
+      ORDER BY b."winAmount" DESC
+      LIMIT 3
+    `;
+
+    const topWinners = topWinnersRows.map((b: any) => ({
+      username: b.username || "لاعب",
+      avatar: b.avatar || "avatar_1",
+      winAmount: typeof b.winAmount === 'string' ? parseFloat(b.winAmount) : (b.winAmount || 0.0)
     }));
 
     return res.json({
@@ -625,6 +624,7 @@ router.get("/rounds/:id", authenticateToken, async (req: AuthenticatedRequest, r
       topWinners
     });
   } catch (err) {
+    console.error("Failed to fetch round details:", err);
     return res.status(500).json({ error: "Failed to fetch round details." });
   }
 });

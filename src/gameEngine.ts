@@ -49,6 +49,10 @@ export class GameEngine {
     this.io = io;
   }
 
+  public getIo(): Server | null {
+    return this.io;
+  }
+
   public getCurrentRound() {
     const elapsedMs = this.getElapsedMs();
     const remainingMs = Math.max(0, this.phaseDurationMs - elapsedMs);
