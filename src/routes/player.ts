@@ -147,139 +147,72 @@ router.get("/history", authenticateToken, async (req: AuthenticatedRequest, res:
   }
 });
 
-// 4. In-App Leaderboards / Rankings
+// 4. In-App Leaderboards / Rankings (Based on Cash wagers)
 router.get("/rankings", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
-  const category = (req.query.category as string) || "winners"; // winners, depositors, withdrawers
-  const timeframe = (req.query.timeframe as string) || "daily"; // daily, weekly, monthly
-  
-  let dateFilter = new Date();
-  if (timeframe === "daily") {
-    dateFilter.setHours(0, 0, 0, 0);
-  } else if (timeframe === "weekly") {
-    const day = dateFilter.getDay();
-    const diff = dateFilter.getDate() - day + (day === 0 ? -6 : 1);
-    dateFilter = new Date(dateFilter.setDate(diff));
-    dateFilter.setHours(0, 0, 0, 0);
-  } else if (timeframe === "monthly") {
-    dateFilter.setDate(1);
-    dateFilter.setHours(0, 0, 0, 0);
-  }
+  const userId = req.user?.id;
 
   try {
-    if (category === "winners") {
-      // Group bets that won
-      const topWinners = await prisma.bet.groupBy({
-        by: ["userId"],
-        where: {
-          status: "WON",
-          currency: "CASH",
-          createdAt: { gte: dateFilter }
-        },
-        _sum: {
-          winAmount: true
-        },
-        orderBy: {
-          _sum: {
-            winAmount: "desc"
-          }
-        },
-        take: 10
-      });
+    // 1. Group wagers by userId where currency is CASH
+    const wagers = await prisma.bet.groupBy({
+      by: ["userId"],
+      where: { currency: "CASH" }
+    });
 
-      const userDetails = await prisma.user.findMany({
-        where: { id: { in: topWinners.map(w => w.userId) } },
-        select: { id: true, username: true, avatar: true }
-      });
+    // 2. Sort wagers in memory
+    const formatted = wagers.map((row: any) => ({
+      userId: row.userId,
+      totalWagered: parseFloat(row._sum || row.sum || row.amount || "0")
+    }));
+    formatted.sort((a: any, b: any) => b.totalWagered - a.totalWagered);
 
-      const rankings = topWinners.map((w, idx) => {
-        const user = userDetails.find(u => u.id === w.userId);
-        return {
-          rank: idx + 1,
-          userId: w.userId,
-          username: user?.username || "Player",
-          avatar: user?.avatar || "avatar_1",
-          value: w._sum.winAmount || 0
-        };
-      });
+    // 3. Fetch all user details to merge profiles
+    const users = await prisma.user.findMany();
 
-      return res.json({ rankings });
+    const rankings = formatted.map((item: any, idx: number) => {
+      const u = users.find((user: any) => user.id === item.userId);
+      return {
+        rank: idx + 1,
+        userId: item.userId,
+        publicId: u?.publicId || "",
+        username: u?.username || "Player",
+        displayNickname: u?.displayNickname || u?.username || "لاعب",
+        avatar: u?.avatar || "avatar_1",
+        value: item.totalWagered
+      };
+    });
 
-    } else if (category === "depositors") {
-      const topDepositors = await prisma.deposit.groupBy({
-        by: ["userId"],
-        where: {
-          status: "APPROVED",
-          createdAt: { gte: dateFilter }
-        },
-        _sum: {
-          amount: true
-        },
-        orderBy: {
-          _sum: {
-            amount: "desc"
-          }
-        },
-        take: 10
-      });
+    // 4. Get requesting user stats
+    const myIndex = rankings.findIndex((r: any) => r.userId === userId);
+    let myRankInfo = null;
 
-      const userDetails = await prisma.user.findMany({
-        where: { id: { in: topDepositors.map(d => d.userId) } },
-        select: { id: true, username: true, avatar: true }
-      });
+    if (userId) {
+      const u = users.find((user: any) => user.id === userId);
+      const myWagered = myIndex !== -1 ? rankings[myIndex].value : 0;
+      const myRank = myIndex !== -1 ? myIndex + 1 : -1;
+      
+      let coinsToRank99 = 0;
+      if (myRank > 99 || myRank === -1) {
+        const rank99Value = rankings.length >= 99 ? rankings[98].value : 0;
+        coinsToRank99 = Math.max(0, rank99Value - myWagered);
+      }
 
-      const rankings = topDepositors.map((d, idx) => {
-        const user = userDetails.find(u => u.id === d.userId);
-        return {
-          rank: idx + 1,
-          userId: d.userId,
-          username: user?.username || "Player",
-          avatar: user?.avatar || "avatar_1",
-          value: d._sum.amount || 0
-        };
-      });
-
-      return res.json({ rankings });
-
-    } else if (category === "withdrawers") {
-      const topWithdrawers = await prisma.withdrawal.groupBy({
-        by: ["userId"],
-        where: {
-          status: "APPROVED",
-          createdAt: { gte: dateFilter }
-        },
-        _sum: {
-          amount: true
-        },
-        orderBy: {
-          _sum: {
-            amount: "desc"
-          }
-        },
-        take: 10
-      });
-
-      const userDetails = await prisma.user.findMany({
-        where: { id: { in: topWithdrawers.map(w => w.userId) } },
-        select: { id: true, username: true, avatar: true }
-      });
-
-      const rankings = topWithdrawers.map((w, idx) => {
-        const user = userDetails.find(u => u.id === w.userId);
-        return {
-          rank: idx + 1,
-          userId: w.userId,
-          username: user?.username || "Player",
-          avatar: user?.avatar || "avatar_1",
-          value: w._sum.amount || 0
-        };
-      });
-
-      return res.json({ rankings });
+      myRankInfo = {
+        rank: myRank,
+        value: myWagered,
+        displayNickname: u?.displayNickname || u?.username || "أنت",
+        publicId: u?.publicId || "",
+        avatar: u?.avatar || "avatar_1",
+        coinsToRank99
+      };
     }
 
-    return res.status(400).json({ error: "Invalid leaderboard category." });
+    // Return top 100
+    return res.json({
+      rankings: rankings.slice(0, 100),
+      myRank: myRankInfo
+    });
   } catch (error) {
-    console.error("Rankings error:", error);
+    console.error("Fetch rankings error:", error);
     return res.status(500).json({ error: "Failed to load rankings." });
   }
 });
