@@ -98,11 +98,17 @@ const makeModel = (table: string) => ({
   },
   async create({ data }: { data: DataClause }) {
     if (!data.id && table !== "EventLog") data = { id: uuidv4(), ...data };
+    if (["Wallet", "Deposit", "Withdrawal"].includes(table) && !data.updatedAt) {
+      data = { ...data, updatedAt: new Date() };
+    }
     const { sql, params } = buildInsertSQL(table, data);
     const rows = await runQuery(sql, params);
     return rows[0];
   },
   async update({ where, data }: { where: WhereClause; data: DataClause }) {
+    if (["Wallet", "Deposit", "Withdrawal"].includes(table) && !data.updatedAt) {
+      data = { ...data, updatedAt: new Date() };
+    }
     const { clause: whereClause, params: whereParams } = buildWhereSQL(where);
     const { clause: setClause, params: setParams } = buildSetSQL(data, whereParams.length);
     const sql = `UPDATE "${table}" ${setClause} ${whereClause} RETURNING *`;

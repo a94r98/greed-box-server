@@ -38,14 +38,10 @@ router.post("/guest", async (req, res): Promise<any> => {
 
   try {
     // Check if the device fingerprint or deviceId is permanently banned
-    const bannedDevice = await prisma.eventLog.findFirst({
-      where: {
-        eventType: "DEVICE_PERMANENT_BAN",
-        message: {
-          contains: deviceId
-        }
-      }
+    const banLogs = await prisma.eventLog.findMany({
+      where: { eventType: "DEVICE_PERMANENT_BAN" }
     });
+    const bannedDevice = banLogs.find((log: any) => log.message && log.message.includes(deviceId));
 
     if (bannedDevice) {
       return res.status(403).json({ error: "This device has been permanently banned from accessing Greedy Box." });
@@ -152,12 +148,10 @@ router.post("/register", async (req, res): Promise<any> => {
 
   try {
     // Check if the device is banned
-    const bannedDevice = await prisma.eventLog.findFirst({
-      where: {
-        eventType: "DEVICE_PERMANENT_BAN",
-        message: { contains: deviceId }
-      }
+    const banLogs = await prisma.eventLog.findMany({
+      where: { eventType: "DEVICE_PERMANENT_BAN" }
     });
+    const bannedDevice = banLogs.find((log: any) => log.message && log.message.includes(deviceId));
     if (bannedDevice) {
       return res.status(403).json({ error: "هذا الجهاز محظور نهائياً من اللعب." });
     }
