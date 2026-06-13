@@ -207,19 +207,30 @@ router.post("/users/:id/ban-device", requireSuperAdmin, async (req: Authenticate
 // Balance Adjustments (ADMIN allowed)
 router.put("/users/:id/balance", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
   const userId = req.params.id;
-  const { freeAmount, cashAmount, reason } = req.body;
-
-  if (freeAmount === undefined && cashAmount === undefined) {
-    return res.status(400).json({ error: "Provide either freeAmount or cashAmount." });
-  }
+  const { freeDelta, cashDelta, freeAmount, cashAmount, reason } = req.body;
 
   try {
     const wallet = await prisma.wallet.findUnique({ where: { userId } });
     if (!wallet) return res.status(404).json({ error: "User wallet not found." });
 
     const updated = await prisma.$transaction(async (tx: any) => {
-      const finalFree = freeAmount !== undefined ? freeAmount : wallet.freeBalance;
-      const finalCash = cashAmount !== undefined ? cashAmount : wallet.cashBalance;
+      let finalFree = wallet.freeBalance;
+      let finalCash = wallet.cashBalance;
+
+      if (freeDelta !== undefined) {
+        finalFree += parseFloat(freeDelta);
+      } else if (freeAmount !== undefined) {
+        finalFree = parseFloat(freeAmount);
+      }
+
+      if (cashDelta !== undefined) {
+        finalCash += parseFloat(cashDelta);
+      } else if (cashAmount !== undefined) {
+        finalCash = parseFloat(cashAmount);
+      }
+
+      if (finalFree < 0) finalFree = 0;
+      if (finalCash < 0) finalCash = 0;
 
       const updatedWallet = await tx.wallet.update({
         where: { userId },
@@ -229,17 +240,32 @@ router.put("/users/:id/balance", async (req: AuthenticatedRequest, res: Response
         }
       });
 
-      const amountDiff = (freeAmount !== undefined ? freeAmount - wallet.freeBalance : 0) + (cashAmount !== undefined ? cashAmount - wallet.cashBalance : 0);
+      const freeDiff = updatedWallet.freeBalance - wallet.freeBalance;
+      const cashDiff = updatedWallet.cashBalance - wallet.cashBalance;
 
-      await tx.transaction.create({
-        data: {
-          userId,
-          amount: amountDiff,
-          currency: freeAmount !== undefined ? "FREE" : "CASH",
-          type: "ADMIN_ADJUSTMENT",
-          description: `Admin balance override. Reason: ${reason || "No reason specified"}`
-        }
-      });
+      if (freeDiff !== 0) {
+        await tx.transaction.create({
+          data: {
+            userId,
+            amount: freeDiff,
+            currency: "FREE",
+            type: "ADMIN_ADJUSTMENT",
+            description: `Admin balance adjustment. Reason: ${reason || "No reason specified"}`
+          }
+        });
+      }
+
+      if (cashDiff !== 0) {
+        await tx.transaction.create({
+          data: {
+            userId,
+            amount: cashDiff,
+            currency: "CASH",
+            type: "ADMIN_ADJUSTMENT",
+            description: `Admin balance adjustment. Reason: ${reason || "No reason specified"}`
+          }
+        });
+      }
 
       return updatedWallet;
     });
@@ -248,15 +274,137 @@ router.put("/users/:id/balance", async (req: AuthenticatedRequest, res: Response
       data: {
         eventType: "WALLET_UPDATE",
         userId,
-        message: `Admin ${req.user?.id} updated user balance: Free=${updated.freeBalance}, Cash=${updated.cashBalance} (Prev Free=${wallet.freeBalance}, Prev Cash=${wallet.cashBalance}). Reason: ${reason}`
+        message: `Admin ${req.user?.id} updated user balance. Free Change=${updated.freeBalance - wallet.freeBalance}, Cash Change=${updated.cashBalance - wallet.cashBalance} (New Free=${updated.freeBalance}, New Cash=${updated.cashBalance}). Reason: ${reason}`
       }
     });
 
     return res.json({ message: "Balances updated successfully.", wallet: updated });
   } catch (err) {
+    console.error("Balance update error:", err);
     return res.status(500).json({ error: "Balance update failed." });
   }
 });
+
+// Retrieve User Logs (Activity & Admin actions)
+router.get("/users/:id/logs", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.params.id;
+
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(404).json({ error: "المستخدم غير موجود." });
+
+    const bets = await prisma.bet.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      take: 50
+    });
+
+    const transactions = await prisma.transaction.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      take: 50
+    });
+
+    const deposits = await prisma.deposit.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      take: 50
+    });
+
+    const withdrawals = await prisma.withdrawal.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      take: 50
+    });
+
+    const adminLogs = await prisma.eventLog.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      take: 100
+    });
+
+    // Compile activity logs
+    const activityLogs: any[] = [];
+
+    bets.forEach((b: any) => {
+      activityLogs.push({
+        type: "BET",
+        message: `مراهنة بمبلغ ${b.amount} ${b.currency} على الصندوق ${b.boxIndex} (الحالة: ${b.status}، الفوز: ${b.winAmount})`,
+        date: b.createdAt
+      });
+    });
+
+    deposits.forEach((d: any) => {
+      activityLogs.push({
+        type: "DEPOSIT",
+        message: `طلب شحن بقيمة ${d.amount} CASH (الحالة: ${d.status})`,
+        date: d.createdAt
+      });
+    });
+
+    withdrawals.forEach((w: any) => {
+      activityLogs.push({
+        type: "WITHDRAWAL",
+        message: `طلب سحب بقيمة ${w.amount} CASH (الحالة: ${w.status})`,
+        date: w.createdAt
+      });
+    });
+
+    transactions.forEach((t: any) => {
+      if (t.type === "BET_PLACE" || t.type === "BET_WIN") return;
+      activityLogs.push({
+        type: t.type,
+        message: `${t.description} (${t.amount > 0 ? "+" : ""}${t.amount} ${t.currency})`,
+        date: t.createdAt
+      });
+    });
+
+    // Sort activity logs by date desc
+    activityLogs.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    // Compile admin actions
+    const adminActions = adminLogs.map((log: any) => ({
+      type: log.eventType,
+      message: log.message,
+      date: log.createdAt
+    }));
+
+    return res.json({
+      activityLogs: activityLogs.slice(0, 100),
+      adminActions
+    });
+  } catch (err) {
+    console.error("Failed to load user logs:", err);
+    return res.status(500).json({ error: "Failed to load user logs." });
+  }
+});
+
+// Delete user account permanently (SuperAdmin only)
+router.delete("/users/:id", requireSuperAdmin, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.params.id;
+
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(404).json({ error: "المستخدم غير موجود." });
+
+    await prisma.user.delete({
+      where: { id: userId }
+    });
+
+    await prisma.eventLog.create({
+      data: {
+        eventType: "ADMIN_DELETE_USER",
+        message: `PERMANENT PURGE: User [Username: ${user.username}, PublicID: ${user.publicId}, Email: ${user.email || 'N/A'}, DeviceID: ${user.deviceId}] was permanently deleted by SuperAdmin: ${req.user?.id}`
+      }
+    });
+
+    return res.json({ message: "تم حذف حساب المستخدم نهائياً من قاعدة البيانات بنجاح." });
+  } catch (err) {
+    console.error("Failed to purge user:", err);
+    return res.status(500).json({ error: "فشل حذف حساب المستخدم من قاعدة البيانات." });
+  }
+});
+
 
 // 3. Deposit Approval Queue
 router.get("/deposits", async (req, res) => {

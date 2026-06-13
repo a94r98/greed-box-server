@@ -184,7 +184,7 @@ router.get("/rankings", authenticateToken, async (req: AuthenticatedRequest, res
 
     // 4. Get requesting user stats
     const myIndex = rankings.findIndex((r: any) => r.userId === userId);
-    let myRankInfo = null;
+    let myRankInfo: any = null;
 
     if (userId) {
       const u = users.find((user: any) => user.id === userId);
