@@ -938,4 +938,18 @@ router.post("/support/messages", authenticateToken, async (req: AuthenticatedReq
   }
 });
 
+// Get support WhatsApp and Telegram config links
+router.get("/support/config", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  try {
+    const config = await prisma.systemConfig.findUnique({ where: { id: "singleton" } });
+    return res.json({
+      supportTelegram: config?.supportTelegram || "",
+      supportWhatsApp: config?.supportWhatsApp || ""
+    });
+  } catch (error) {
+    console.error("Get support config error:", error);
+    return res.status(500).json({ error: "Failed to load support configuration." });
+  }
+});
+
 export default router;
