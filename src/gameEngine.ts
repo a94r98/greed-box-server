@@ -60,7 +60,7 @@ export class GameEngine {
     return {
       roundId: this.currentRoundId,
       status: this.currentStatus,
-      currencyMode: this.currentCurrencyMode,
+      currencyMode: this.currentCurrencyMode === "FREE" ? "FREE_ONLY" : "CASH_ONLY",
       remainingMs,
       sequenceNumber: this.sequenceNumber,
       serverTimestamp: Date.now(),
@@ -806,7 +806,7 @@ export class GameEngine {
     this.io?.emit("round_state_change", {
       roundId: this.currentRoundId,
       status: this.currentStatus,
-      currencyMode: this.currentCurrencyMode,
+      currencyMode: this.currentCurrencyMode === "FREE" ? "FREE_ONLY" : "CASH_ONLY",
       remainingMs,
       sequenceNumber: this.sequenceNumber,
       serverTimestamp: Date.now(),
