@@ -149,21 +149,52 @@ router.get("/history", authenticateToken, async (req: AuthenticatedRequest, res:
   const userId = req.user?.id;
   if (!userId) return res.status(400).json({ error: "Unauthorized." });
 
-  const limit = parseInt(req.query.limit as string) || 20;
+  const limit = parseInt(req.query.limit as string) || 50;
   const page = parseInt(req.query.page as string) || 1;
+  const yearVal = req.query.year ? parseInt(req.query.year as string) : null;
+  const monthVal = req.query.month ? parseInt(req.query.month as string) : null;
 
   try {
-    const total = await prisma.bet.count({ where: { userId } });
     const offset = (page - 1) * limit;
-    const bets = await prisma.$queryRaw`
+
+    let countQuery = `SELECT COUNT(*) as count FROM "Bet" b WHERE b."userId" = $1`;
+    const countParams: any[] = [userId];
+    if (yearVal) {
+      countParams.push(yearVal);
+      countQuery += ` AND EXTRACT(YEAR FROM b."createdAt") = $${countParams.length}`;
+    }
+    if (monthVal) {
+      countParams.push(monthVal);
+      countQuery += ` AND EXTRACT(MONTH FROM b."createdAt") = $${countParams.length}`;
+    }
+
+    const countRows: any = await prisma.$queryRawUnsafe(countQuery, ...countParams);
+    const total = parseInt(countRows[0]?.count ?? "0");
+
+    let queryStr = `
       SELECT b.id, b."roundId", b."boxIndex", b.amount, b.currency, b.status, b."winAmount", b."createdAt",
              r."winningBox", r."winningMultiplier"
       FROM "Bet" b
       LEFT JOIN "Round" r ON b."roundId" = r.id
-      WHERE b."userId" = ${userId}
-      ORDER BY b."createdAt" DESC
-      LIMIT ${limit} OFFSET ${offset}
+      WHERE b."userId" = $1
     `;
+    const params: any[] = [userId];
+
+    if (yearVal) {
+      params.push(yearVal);
+      queryStr += ` AND EXTRACT(YEAR FROM b."createdAt") = $${params.length}`;
+    }
+    if (monthVal) {
+      params.push(monthVal);
+      queryStr += ` AND EXTRACT(MONTH FROM b."createdAt") = $${params.length}`;
+    }
+
+    queryStr += ` ORDER BY b."createdAt" DESC`;
+
+    params.push(limit, offset);
+    queryStr += ` LIMIT $${params.length - 1} OFFSET $${params.length}`;
+
+    const bets: any = await prisma.$queryRawUnsafe(queryStr, ...params);
 
     const formattedHistory = bets.map((b: any) => ({
       betId: b.id,
