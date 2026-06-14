@@ -36,8 +36,13 @@ function buildSetSQL(data: DataClause, offset = 0): { clause: string; params: an
   const keys = Object.keys(data);
   const params: any[] = [];
   const parts = keys.map((k, i) => {
-    params.push(data[k]);
-    return `"${k}" = $${i + 1 + offset}`;
+    const val = data[k];
+    if (val && typeof val === "object" && val.increment !== undefined) {
+      params.push(val.increment);
+      return `"${k}" = "${k}" + $${params.length + offset}`;
+    }
+    params.push(val);
+    return `"${k}" = $${params.length + offset}`;
   });
   return { clause: `SET ${parts.join(", ")}`, params };
 }
