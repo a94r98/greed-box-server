@@ -189,7 +189,7 @@ export class GameEngine {
         ? { freeBalance: wallet.freeBalance - amount }
         : { cashBalance: wallet.cashBalance - amount };
 
-      await tx.wallet.update({
+      const updatedWallet = await tx.wallet.update({
         where: { userId },
         data: balanceData
       });
@@ -231,8 +231,18 @@ export class GameEngine {
         });
       }
 
-      return bet;
+      return { bet, wallet: updatedWallet };
     });
+
+    // Emit wallet update to the user's socket room
+    try {
+      this.io?.to(`user:${userId}`).emit("wallet_update", {
+        freeBalance: betResult.wallet.freeBalance,
+        cashBalance: betResult.wallet.cashBalance
+      });
+    } catch (wsErr) {
+      console.error("Failed to emit wallet update socket:", wsErr);
+    }
 
     // ─── TASK SYSTEM TRIGGERS ──────────────────────────────────────────────
     try {
@@ -250,10 +260,10 @@ export class GameEngine {
     // Cache locally
     const activeBet: ActiveBet = {
       userId,
-      amount: betResult.amount,
-      boxIndex: betResult.boxIndex,
-      currency: betResult.currency as "FREE" | "CASH",
-      clientBetId: betResult.clientBetId
+      amount: betResult.bet.amount,
+      boxIndex: betResult.bet.boxIndex,
+      currency: betResult.bet.currency as "FREE" | "CASH",
+      clientBetId: betResult.bet.clientBetId
     };
 
     const userBets = this.activeBets.get(userId) || [];
@@ -703,6 +713,22 @@ export class GameEngine {
         const roundBets = await prisma.bet.findMany({
           where: { roundId: this.currentRoundId }
         });
+
+        // Emit updated wallets to all users who placed bets in this round
+        try {
+          const uniqueUserIds = Array.from(new Set(roundBets.map(b => b.userId)));
+          for (const uId of uniqueUserIds) {
+            const wallet = await prisma.wallet.findUnique({ where: { userId: uId } });
+            if (wallet) {
+              this.io?.to(`user:${uId}`).emit("wallet_update", {
+                freeBalance: wallet.freeBalance,
+                cashBalance: wallet.cashBalance
+              });
+            }
+          }
+        } catch (wsErr) {
+          console.error("Failed to emit wallet updates after round end:", wsErr);
+        }
 
         const playerSummaries: Record<string, {
           totalBetCash: number;
