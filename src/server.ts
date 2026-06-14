@@ -64,13 +64,13 @@ io.on("connection", (socket) => {
 
   // Listen for bet placements over socket
   socket.on("place_bet", async (data, callback) => {
-    const { boxIndex, amount, clientBetId } = data;
+    const { boxIndex, amount, clientBetId, currency } = data;
     if (boxIndex === undefined || amount === undefined || !clientBetId) {
       return callback({ error: "Missing bet parameters." });
     }
 
     try {
-      const activeBet = await gameEngine.placeBet(user.id, boxIndex, amount, clientBetId);
+      const activeBet = await gameEngine.placeBet(user.id, boxIndex, amount, clientBetId, currency);
       callback({ success: true, bet: activeBet });
     } catch (err: any) {
       callback({ error: err.message || "Failed to place bet." });

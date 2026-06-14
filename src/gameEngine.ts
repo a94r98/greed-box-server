@@ -16,7 +16,7 @@ export class GameEngine {
   private io: Server | null = null;
   private currentRoundId: string = "";
   private currentStatus: RoundState = RoundState.ENDED;
-  private currentCurrencyMode: "FREE" | "CASH" = "FREE";
+  private currentCurrencyMode: "FREE" | "CASH" | "BOTH" = "FREE";
   private sequenceNumber: number = 0;
   
   // Timers and monotonic track
@@ -60,7 +60,7 @@ export class GameEngine {
     return {
       roundId: this.currentRoundId,
       status: this.currentStatus,
-      currencyMode: this.currentCurrencyMode === "FREE" ? "FREE_ONLY" : "CASH_ONLY",
+      currencyMode: this.currentCurrencyMode === "BOTH" ? "BOTH" : (this.currentCurrencyMode === "FREE" ? "FREE_ONLY" : "CASH_ONLY"),
       remainingMs,
       sequenceNumber: this.sequenceNumber,
       serverTimestamp: Date.now(),
@@ -119,7 +119,7 @@ export class GameEngine {
   }
 
   // Place bet function (Idempotency, Isolation, Validation)
-  public async placeBet(userId: string, boxIndex: number, amount: number, clientBetId: string): Promise<ActiveBet> {
+  public async placeBet(userId: string, boxIndex: number, amount: number, clientBetId: string, currency?: "FREE" | "CASH"): Promise<ActiveBet> {
     if (this.currentStatus !== RoundState.BETTING) {
       throw new Error("Bets are locked for the current round.");
     }
@@ -133,6 +133,14 @@ export class GameEngine {
 
     if (boxIndex < 0 || boxIndex > 7) {
       throw new Error("Invalid box index selected.");
+    }
+
+    let activeCurrency: "FREE" | "CASH" = currency || (this.currentCurrencyMode === "BOTH" ? "FREE" : this.currentCurrencyMode);
+    if (this.currentCurrencyMode === "FREE" && activeCurrency !== "FREE") {
+      throw new Error("Only FREE bets are allowed in this round.");
+    }
+    if (this.currentCurrencyMode === "CASH" && activeCurrency !== "CASH") {
+      throw new Error("Only CASH bets are allowed in this round.");
     }
 
     const idempotencyKey = `${userId}:${this.currentRoundId}:${clientBetId}`;
@@ -150,7 +158,7 @@ export class GameEngine {
       const wallet = await tx.wallet.findUnique({ where: { userId } });
       if (!wallet) throw new Error("Wallet not found.");
 
-      const isFree = this.currentCurrencyMode === "FREE";
+      const isFree = activeCurrency === "FREE";
       const userBalance = isFree ? wallet.freeBalance : wallet.cashBalance;
 
       if (userBalance < amount) {
@@ -159,11 +167,11 @@ export class GameEngine {
 
       // 2. Enforce Payout Exposure Limit check
       const totalBetsOnBox = (this.activeBets.get(userId) || [])
-        .filter(b => b.boxIndex === boxIndex)
+        .filter(b => b.boxIndex === boxIndex && b.currency === activeCurrency)
         .reduce((sum, b) => sum + b.amount, 0) + amount;
         
       const pool = await tx.housePool.findUnique({
-        where: { type: this.currentCurrencyMode }
+        where: { type: activeCurrency }
       });
       if (!pool) throw new Error("House Pool not found.");
 
@@ -191,7 +199,7 @@ export class GameEngine {
         data: {
           userId,
           amount: -amount,
-          currency: this.currentCurrencyMode,
+          currency: activeCurrency,
           type: "BET_PLACE",
           description: `Placed bet of ${amount} on Box ${boxIndex} (Round: ${this.currentRoundId.substring(0, 8)})`
         }
@@ -205,7 +213,7 @@ export class GameEngine {
           clientBetId,
           boxIndex,
           amount,
-          currency: this.currentCurrencyMode,
+          currency: activeCurrency,
           status: "PENDING"
         }
       });
@@ -229,7 +237,7 @@ export class GameEngine {
     // ─── TASK SYSTEM TRIGGERS ──────────────────────────────────────────────
     try {
       const { trackTaskProgress } = require("./taskTracker");
-      if (this.currentCurrencyMode === "FREE") {
+      if (activeCurrency === "FREE") {
         await trackTaskProgress(userId, "USE_DIAMONDS", 1);
       } else {
         await trackTaskProgress(userId, "BET_COINS", Math.round(amount));
@@ -322,8 +330,7 @@ export class GameEngine {
     const isCash = config?.isCashEnabled ?? true;
     
     if (isFree && isCash) {
-      // Alternate
-      this.currentCurrencyMode = this.currentCurrencyMode === "FREE" ? "CASH" : "FREE";
+      this.currentCurrencyMode = "BOTH";
     } else if (isCash) {
       this.currentCurrencyMode = "CASH";
     } else {
@@ -335,7 +342,7 @@ export class GameEngine {
     const newRound = await prisma.round.create({
       data: {
         status: RoundState.BETTING,
-        currencyMode: this.currentCurrencyMode === "FREE" ? "FREE_ONLY" : "CASH_ONLY",
+        currencyMode: this.currentCurrencyMode === "BOTH" ? "BOTH" : (this.currentCurrencyMode === "FREE" ? "FREE_ONLY" : "CASH_ONLY"),
         sequenceNumber: this.sequenceNumber
       }
     });
@@ -447,8 +454,22 @@ export class GameEngine {
   // Calculates winner using Black Box Risk engine
   private async processCalculation() {
     try {
+      let activeCalcMode: "FREE" | "CASH" = "FREE";
+      let hasCashBets = false;
+      this.activeBets.forEach((bets) => {
+        bets.forEach(b => {
+          if (b.currency === "CASH") hasCashBets = true;
+        });
+      });
+
+      if (hasCashBets) {
+        activeCalcMode = "CASH";
+      } else if (this.currentCurrencyMode === "CASH") {
+        activeCalcMode = "CASH";
+      }
+
       const pool = await prisma.housePool.findUnique({
-        where: { type: this.currentCurrencyMode }
+        where: { type: activeCalcMode }
       });
       if (!pool) throw new Error("Active pool not found.");
 
@@ -463,18 +484,30 @@ export class GameEngine {
       const calculation = calculateWinningBox({
         bets: allBetsList,
         poolBalance: pool.balance,
-        currencyMode: this.currentCurrencyMode,
+        currencyMode: activeCalcMode,
         overrideBox: this.overrideBox
       });
 
       // Write snapshots
+      let totalFreeBets = 0;
+      let totalCashBets = 0;
+      this.activeBets.forEach((bets) => {
+        bets.forEach(b => {
+          if (b.currency === "FREE") totalFreeBets += b.amount;
+          else totalCashBets += b.amount;
+        });
+      });
+
+      const freePool = await prisma.housePool.findUnique({ where: { type: "FREE" } });
+      const cashPool = await prisma.housePool.findUnique({ where: { type: "CASH" } });
+
       await prisma.roundSnapshot.create({
         data: {
           roundId: this.currentRoundId,
-          poolFreeBalance: this.currentCurrencyMode === "FREE" ? pool.balance : 0,
-          poolCashBalance: this.currentCurrencyMode === "CASH" ? pool.balance : 0,
-          totalBetsFree: this.currentCurrencyMode === "FREE" ? allBetsList.reduce((sum, b) => sum + b.amount, 0) : 0,
-          totalBetsCash: this.currentCurrencyMode === "CASH" ? allBetsList.reduce((sum, b) => sum + b.amount, 0) : 0,
+          poolFreeBalance: freePool?.balance || 0,
+          poolCashBalance: cashPool?.balance || 0,
+          totalBetsFree: totalFreeBets,
+          totalBetsCash: totalCashBets,
           betsJson: JSON.stringify(allBetsList),
           resultBox: calculation.winningBox,
           isOverride: calculation.isOverride,
@@ -524,31 +557,36 @@ export class GameEngine {
 
       const winningBox = round.winningBox;
       const multiplier = round.winningMultiplier || 5.0;
-      const isFree = this.currentCurrencyMode === "FREE";
 
-      let totalPayout = 0;
-      let totalBetsVolume = 0;
+      let totalPayoutFree = 0;
+      let totalPayoutCash = 0;
+      let totalBetsFreeVolume = 0;
+      let totalBetsCashVolume = 0;
 
       // Executing atomic transaction to process payouts and adjust pools
       await prisma.$transaction(async (tx) => {
-        // Double check house pool availability inside transaction block
-        const pool = await tx.housePool.findUnique({
-          where: { type: this.currentCurrencyMode }
-        });
-        if (!pool) throw new Error("Segmented House pool not found.");
-
         const bets = await tx.bet.findMany({
           where: { roundId: this.currentRoundId }
         });
 
         // 1. Process each bet
         for (const bet of bets) {
-          totalBetsVolume += bet.amount;
           const isWinner = bet.boxIndex === winningBox;
+          const isBetFree = bet.currency === "FREE";
+
+          if (isBetFree) {
+            totalBetsFreeVolume += bet.amount;
+          } else {
+            totalBetsCashVolume += bet.amount;
+          }
 
           if (isWinner) {
             const winReward = bet.amount * multiplier;
-            totalPayout += winReward;
+            if (isBetFree) {
+              totalPayoutFree += winReward;
+            } else {
+              totalPayoutCash += winReward;
+            }
 
             // Update bet record
             await tx.bet.update({
@@ -562,7 +600,7 @@ export class GameEngine {
             // Credit player wallet
             const wallet = await tx.wallet.findUnique({ where: { userId: bet.userId } });
             if (wallet) {
-              const balanceData = isFree
+              const balanceData = isBetFree
                 ? { freeBalance: wallet.freeBalance + winReward }
                 : { cashBalance: wallet.cashBalance + winReward };
 
@@ -577,7 +615,7 @@ export class GameEngine {
               data: {
                 userId: bet.userId,
                 amount: winReward,
-                currency: this.currentCurrencyMode,
+                currency: bet.currency,
                 type: "BET_WIN",
                 description: `Winnings of ${winReward} credited for Box ${winningBox} (Round: ${this.currentRoundId.substring(0, 8)})`
               }
@@ -605,47 +643,59 @@ export class GameEngine {
           }
         }
 
-        // 2. Adjust segmented house pool
-        const netPoolChange = totalBetsVolume - totalPayout;
-        const newPoolBalance = pool.balance + netPoolChange;
+        // 2. Adjust segmented house pools
+        const freePool = await tx.housePool.findUnique({ where: { type: "FREE" } });
+        const cashPool = await tx.housePool.findUnique({ where: { type: "CASH" } });
 
-        if (newPoolBalance < 0) {
-          throw new Error("Transactional safety check failed: pool balance cannot drop below zero.");
+        if (freePool) {
+          const netPoolChangeFree = totalBetsFreeVolume - totalPayoutFree;
+          const newFreePoolBalance = freePool.balance + netPoolChangeFree;
+          if (newFreePoolBalance < 0) {
+            throw new Error("Free pool balance cannot drop below zero.");
+          }
+          await tx.housePool.update({
+            where: { type: "FREE" },
+            data: { balance: newFreePoolBalance }
+          });
+          await tx.housePoolLog.create({
+            data: {
+              poolType: "FREE",
+              amountChange: netPoolChangeFree,
+              type: netPoolChangeFree >= 0 ? "BET_REVENUE" : "PAYOUT_EXPENSE",
+              referenceId: this.currentRoundId
+            }
+          });
         }
 
-        await tx.housePool.update({
-          where: { type: this.currentCurrencyMode },
-          data: { balance: newPoolBalance }
-        });
-
-        // Record house pool logs
-        await tx.housePoolLog.create({
-          data: {
-            poolType: this.currentCurrencyMode,
-            amountChange: netPoolChange,
-            type: netPoolChange >= 0 ? "BET_REVENUE" : "PAYOUT_EXPENSE",
-            referenceId: this.currentRoundId
+        if (cashPool) {
+          const netPoolChangeCash = totalBetsCashVolume - totalPayoutCash;
+          const newCashPoolBalance = cashPool.balance + netPoolChangeCash;
+          if (newCashPoolBalance < 0) {
+            throw new Error("Cash pool balance cannot drop below zero.");
           }
-        });
+          await tx.housePool.update({
+            where: { type: "CASH" },
+            data: { balance: newCashPoolBalance }
+          });
+          await tx.housePoolLog.create({
+            data: {
+              poolType: "CASH",
+              amountChange: netPoolChangeCash,
+              type: netPoolChangeCash >= 0 ? "BET_REVENUE" : "PAYOUT_EXPENSE",
+              referenceId: this.currentRoundId
+            }
+          });
+        }
 
         // 3. Update Round totals
-        if (isFree) {
-          await tx.round.update({
-            where: { id: this.currentRoundId },
-            data: {
-              totalPayoutFree: totalPayout,
-              status: RoundState.ENDED
-            }
-          });
-        } else {
-          await tx.round.update({
-            where: { id: this.currentRoundId },
-            data: {
-              totalPayoutCash: totalPayout,
-              status: RoundState.ENDED
-            }
-          });
-        }
+        await tx.round.update({
+          where: { id: this.currentRoundId },
+          data: {
+            totalPayoutFree: totalPayoutFree,
+            totalPayoutCash: totalPayoutCash,
+            status: RoundState.ENDED
+          }
+        });
       });
 
       // ─── TASK SYSTEM TRIGGERS ──────────────────────────────────────────────
@@ -655,26 +705,33 @@ export class GameEngine {
         });
 
         const playerSummaries: Record<string, {
-          totalBet: number;
-          totalWin: number;
+          totalBetCash: number;
+          totalWinCash: number;
           hasWin: boolean;
           maxMultiplier: number;
+          hasCashBets: boolean;
         }> = {};
 
         for (const b of roundBets) {
           if (!playerSummaries[b.userId]) {
             playerSummaries[b.userId] = {
-              totalBet: 0,
-              totalWin: 0,
+              totalBetCash: 0,
+              totalWinCash: 0,
               hasWin: false,
-              maxMultiplier: 0
+              maxMultiplier: 0,
+              hasCashBets: false
             };
           }
           const summary = playerSummaries[b.userId];
-          summary.totalBet += b.amount;
+          if (b.currency === "CASH") {
+            summary.hasCashBets = true;
+            summary.totalBetCash += b.amount;
+          }
           if (b.status === "WON") {
-            summary.totalWin += b.winAmount;
             summary.hasWin = true;
+            if (b.currency === "CASH") {
+              summary.totalWinCash += b.winAmount;
+            }
             if (this.currentWinningMultiplier && this.currentWinningMultiplier > summary.maxMultiplier) {
               summary.maxMultiplier = this.currentWinningMultiplier;
             }
@@ -691,8 +748,8 @@ export class GameEngine {
             await trackTaskProgress(userId, "WIN_ROUNDS", 1);
             await trackTaskProgress(userId, "FIRST_WIN", 1);
 
-            if (!isFree) {
-              const netProfit = summary.totalWin - summary.totalBet;
+            if (summary.hasCashBets) {
+              const netProfit = summary.totalWinCash - summary.totalBetCash;
               if (netProfit > 0) {
                 await trackTaskProgress(userId, "WIN_PROFIT_TOTAL", Math.round(netProfit));
               }
@@ -707,7 +764,7 @@ export class GameEngine {
         console.error("Error updating tasks on round end:", taskErr);
       }
 
-      console.log(`[Round Engine] Completed payouts. Total Bets: ${totalBetsVolume}, Total Winnings Paid: ${totalPayout}`);
+      console.log(`[Round Engine] Completed payouts. Total Free Bets: ${totalBetsFreeVolume}, Total Cash Bets: ${totalBetsCashVolume}`);
       
       let topWinners: any[] = [];
       try {
@@ -736,7 +793,7 @@ export class GameEngine {
       await logEvent({
         roundId: this.currentRoundId,
         eventType: EventType.PAYOUT,
-        message: `Payout completed. Winning Box: ${winningBox}, Total Volume: ${totalBetsVolume}, Payout: ${totalPayout}`
+        message: `Payout completed. Winning Box: ${winningBox}, Total Volume Free: ${totalBetsFreeVolume}, Cash: ${totalBetsCashVolume}`
       });
 
     } catch (err) {
@@ -758,7 +815,8 @@ export class GameEngine {
         await prisma.$transaction(async (tx) => {
           const wallet = await tx.wallet.findUnique({ where: { userId: bet.userId } });
           if (wallet) {
-            const balanceData = this.currentCurrencyMode === "FREE"
+            const isBetFree = bet.currency === "FREE";
+            const balanceData = isBetFree
               ? { freeBalance: wallet.freeBalance + bet.amount }
               : { cashBalance: wallet.cashBalance + bet.amount };
 
@@ -771,7 +829,7 @@ export class GameEngine {
               data: {
                 userId: bet.userId,
                 amount: bet.amount,
-                currency: this.currentCurrencyMode,
+                currency: bet.currency,
                 type: "BET_REFUND",
                 description: `Refunded bet of ${bet.amount} due to server error (Round: ${this.currentRoundId.substring(0, 8)})`
               }
@@ -806,7 +864,7 @@ export class GameEngine {
     this.io?.emit("round_state_change", {
       roundId: this.currentRoundId,
       status: this.currentStatus,
-      currencyMode: this.currentCurrencyMode === "FREE" ? "FREE_ONLY" : "CASH_ONLY",
+      currencyMode: this.currentCurrencyMode === "BOTH" ? "BOTH" : (this.currentCurrencyMode === "FREE" ? "FREE_ONLY" : "CASH_ONLY"),
       remainingMs,
       sequenceNumber: this.sequenceNumber,
       serverTimestamp: Date.now(),
