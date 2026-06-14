@@ -746,7 +746,9 @@ router.put("/config", requireSuperAdmin, async (req: AuthenticatedRequest, res: 
     inviteRewardInviter,
     inviteRewardInvitee,
     dailyInviteLimit,
-    isReferralActive
+    isReferralActive,
+    supportTelegram,
+    supportWhatsApp
   } = req.body;
 
   try {
@@ -766,7 +768,9 @@ router.put("/config", requireSuperAdmin, async (req: AuthenticatedRequest, res: 
         inviteRewardInviter,
         inviteRewardInvitee,
         dailyInviteLimit,
-        isReferralActive
+        isReferralActive,
+        supportTelegram: supportTelegram || "",
+        supportWhatsApp: supportWhatsApp || ""
       }
     });
 

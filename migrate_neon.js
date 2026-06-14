@@ -25,6 +25,8 @@ async function migrate() {
         "referralCode"    TEXT NOT NULL UNIQUE,
         "referredByCode"  TEXT,
         "avatar"          TEXT NOT NULL DEFAULT 'avatar_1',
+        "bio"             TEXT,
+        "whatsapp"        TEXT,
         "createdAt"       TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
         "roundsPlayed"    INTEGER NOT NULL DEFAULT 0,
         "roundsWon"       INTEGER NOT NULL DEFAULT 0,
@@ -194,10 +196,30 @@ async function migrate() {
         "inviteRewardInvitee"   DOUBLE PRECISION NOT NULL DEFAULT 200.0,
         "dailyInviteLimit"      INTEGER NOT NULL DEFAULT 5,
         "isReferralActive"      BOOLEAN NOT NULL DEFAULT true,
+        "supportTelegram"       TEXT NOT NULL DEFAULT '',
+        "supportWhatsApp"       TEXT NOT NULL DEFAULT '',
         PRIMARY KEY ("id")
       )
     `;
     console.log("✅ SystemConfig table");
+
+    // Upgrade SystemConfig if columns do not exist
+    try {
+      await sql`ALTER TABLE "SystemConfig" ADD COLUMN IF NOT EXISTS "supportTelegram" TEXT DEFAULT ''`;
+      await sql`ALTER TABLE "SystemConfig" ADD COLUMN IF NOT EXISTS "supportWhatsApp" TEXT DEFAULT ''`;
+      console.log("✅ Upgraded SystemConfig table columns");
+    } catch (configErr) {
+      console.log("⚠️ Config table upgrade notice:", configErr.message);
+    }
+
+    // Upgrade User if columns do not exist
+    try {
+      await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "bio" TEXT DEFAULT ''`;
+      await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "whatsapp" TEXT DEFAULT ''`;
+      console.log("✅ Upgraded User table columns (bio, whatsapp)");
+    } catch (userErr) {
+      console.log("⚠️ User table upgrade notice:", userErr.message);
+    }
 
     await sql`
       CREATE TABLE IF NOT EXISTS "HousePool" (
@@ -254,6 +276,20 @@ async function migrate() {
       )
     `;
     console.log("✅ EventLog table");
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS "SupportMessage" (
+        "id"        TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+        "userId"    TEXT NOT NULL,
+        "sender"    TEXT NOT NULL,
+        "message"   TEXT,
+        "imageUrl"  TEXT,
+        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY ("id"),
+        FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE
+      )
+    `;
+    console.log("✅ SupportMessage table");
 
     await sql`
       CREATE TABLE IF NOT EXISTS "RoundSnapshot" (

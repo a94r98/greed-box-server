@@ -165,6 +165,7 @@ export const prisma = {
   deposit:               makeModel("Deposit"),
   withdrawal:            makeModel("Withdrawal"),
   referral:              makeModel("Referral"),
+  supportMessage:        makeModel("SupportMessage"),
   dailyTask:             makeModel("DailyTask"),
   taskProgress:          makeModel("TaskProgress"),
   systemConfig:          makeModel("SystemConfig"),

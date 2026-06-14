@@ -55,6 +55,8 @@ router.get("/profile", authenticateToken, async (req: AuthenticatedRequest, res:
         avatar: user.avatar,
         age: user.age,
         gender: user.gender,
+        bio: user.bio || "",
+        whatsapp: user.whatsapp || "",
         referralCode: user.referralCode,
         referredByCode: user.referredByCode,
         createdAt: user.createdAt,
@@ -75,6 +77,50 @@ router.get("/profile", authenticateToken, async (req: AuthenticatedRequest, res:
   } catch (error) {
     console.error("Fetch profile error:", error);
     return res.status(500).json({ error: "Internal server error." });
+  }
+});
+
+// Update profile info (Nickname, Bio, Age, Gender, Whatsapp, Custom Avatar/Image)
+router.put("/profile", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.user?.id;
+  const { displayNickname, bio, whatsapp, age, gender, avatar } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ error: "Unauthorized." });
+  }
+
+  try {
+    const dataToUpdate: any = {};
+    if (displayNickname !== undefined) dataToUpdate.displayNickname = displayNickname;
+    if (bio !== undefined) dataToUpdate.bio = bio;
+    if (whatsapp !== undefined) dataToUpdate.whatsapp = whatsapp;
+    if (age !== undefined) dataToUpdate.age = age ? parseInt(age.toString()) : null;
+    if (gender !== undefined) dataToUpdate.gender = gender;
+    if (avatar !== undefined) dataToUpdate.avatar = avatar;
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: dataToUpdate
+    });
+
+    return res.json({
+      message: "Profile updated successfully.",
+      user: {
+        id: updated.id,
+        publicId: updated.publicId,
+        username: updated.username,
+        displayNickname: updated.displayNickname,
+        email: updated.email,
+        avatar: updated.avatar,
+        bio: updated.bio,
+        whatsapp: updated.whatsapp,
+        age: updated.age,
+        gender: updated.gender
+      }
+    });
+  } catch (error) {
+    console.error("Update profile error:", error);
+    return res.status(500).json({ error: "Failed to update profile." });
   }
 });
 
@@ -669,6 +715,195 @@ router.post("/testing/add-coins", authenticateToken, async (req: AuthenticatedRe
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "Refill failed." });
+  }
+});
+
+// ─── REFERRAL SYSTEM ─────────────────────────────────────────────────────────
+
+// Get player referrals list
+router.get("/referrals", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.user?.id;
+  try {
+    const referrals = await prisma.$queryRaw`
+      SELECT r.id, r."bonusPaid", r."createdAt", u.username, u."displayNickname", u."publicId"
+      FROM "Referral" r
+      JOIN "User" u ON r."inviteeId" = u.id
+      WHERE r."inviterId" = ${userId}
+      ORDER BY r."createdAt" DESC
+    `;
+
+    const config = await prisma.systemConfig.findUnique({ where: { id: "singleton" } });
+
+    return res.json({
+      referrals: referrals.map((ref: any) => ({
+        id: ref.id,
+        inviteeId: ref.publicId,
+        username: ref.displayNickname || ref.username || "لاعب",
+        date: ref.createdAt,
+        status: ref.bonusPaid ? "تم الدفع" : "قيد المعالجة"
+      })),
+      isReferralActive: config?.isReferralActive ?? true,
+      inviteReward: config?.inviteRewardInviter ?? 500.0
+    });
+  } catch (error) {
+    console.error("Fetch referrals error:", error);
+    return res.status(500).json({ error: "Failed to fetch referrals." });
+  }
+});
+
+// Apply a referral code
+router.post("/referrals/apply", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.user?.id;
+  const { code } = req.body;
+
+  if (!code) {
+    return res.status(400).json({ error: "كود الدعوة مطلوب." });
+  }
+
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      return res.status(404).json({ error: "المستخدم غير موجود." });
+    }
+
+    if (user.referredByCode) {
+      return res.status(400).json({ error: "لقد قمت بإدخال كود دعوة مسبقاً." });
+    }
+
+    if (user.referralCode === code) {
+      return res.status(400).json({ error: "لا يمكنك استخدام كود الدعوة الخاص بك." });
+    }
+
+    const inviter = await prisma.user.findUnique({ where: { referralCode: code } });
+    if (!inviter) {
+      return res.status(404).json({ error: "كود الدعوة غير صالح." });
+    }
+
+    const config = await prisma.systemConfig.findUnique({ where: { id: "singleton" } });
+    if (config && !config.isReferralActive) {
+      return res.status(400).json({ error: "نظام الدعوات غير نشط حالياً." });
+    }
+
+    const rewardInviter = config?.inviteRewardInviter ?? 500.0;
+    const rewardInvitee = config?.inviteRewardInvitee ?? 200.0;
+
+    await prisma.$transaction(async (tx: any) => {
+      // Update invitee referredByCode
+      await tx.user.update({
+        where: { id: userId },
+        data: { referredByCode: code }
+      });
+
+      // Credit inviter wallet
+      const inviterWallet = await tx.wallet.findUnique({ where: { userId: inviter.id } });
+      if (inviterWallet) {
+        await tx.wallet.update({
+          where: { userId: inviter.id },
+          data: { cashBalance: inviterWallet.cashBalance + rewardInviter }
+        });
+      }
+
+      // Credit invitee wallet
+      const inviteeWallet = await tx.wallet.findUnique({ where: { userId: userId } });
+      if (inviteeWallet) {
+        await tx.wallet.update({
+          where: { userId: userId },
+          data: { cashBalance: inviteeWallet.cashBalance + rewardInvitee }
+        });
+      }
+
+      // Create referral relation
+      await tx.referral.create({
+        data: {
+          inviterId: inviter.id,
+          inviteeId: userId,
+          bonusPaid: true
+        }
+      });
+
+      // Create transaction logs
+      await tx.transaction.create({
+        data: {
+          userId: inviter.id,
+          amount: rewardInviter,
+          currency: 'CASH',
+          type: 'REFERRAL_BONUS',
+          description: `كود دعوة: مكافأة دعوة مستخدم جديد (${user.displayNickname || user.username})`
+        }
+      });
+
+      await tx.transaction.create({
+        data: {
+          userId: userId,
+          amount: rewardInvitee,
+          currency: 'CASH',
+          type: 'REFERRAL_BONUS',
+          description: `كود دعوة: مكافأة تسجيل باستخدام كود دعوة (${inviter.displayNickname || inviter.username})`
+        }
+      });
+    });
+
+    return res.json({
+      message: "تم تطبيق كود الدعوة بنجاح والحصول على المكافأة!",
+      inviteReward: rewardInvitee
+    });
+  } catch (error) {
+    console.error("Apply referral code error:", error);
+    return res.status(500).json({ error: "فشل تطبيق كود الدعوة." });
+  }
+});
+
+// ─── SUPPORT CHAT SYSTEM ─────────────────────────────────────────────────────
+
+// Get support messages
+router.get("/support/messages", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.user?.id;
+  try {
+    const messages = await prisma.supportMessage.findMany({
+      where: { userId },
+      orderBy: { createdAt: "asc" }
+    });
+    return res.json({ messages });
+  } catch (error) {
+    console.error("Get support messages error:", error);
+    return res.status(500).json({ error: "Failed to load support chat." });
+  }
+});
+
+// Send support message
+router.post("/support/messages", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.user?.id;
+  const { message, imageUrl } = req.body;
+
+  try {
+    const newMessage = await prisma.supportMessage.create({
+      data: {
+        userId,
+        sender: "USER",
+        message: message || null,
+        imageUrl: imageUrl || null
+      }
+    });
+
+    // Mock agent reply after 1.5 seconds
+    setTimeout(async () => {
+      try {
+        await prisma.supportMessage.create({
+          data: {
+            userId,
+            sender: "AGENT",
+            message: "مرحباً بك! شكراً لتواصلك مع الدعم الفني لـ Greedy Box. لقد استلمنا رسالتك وسنقوم بالرد عليك في أقرب وقت ممكن. 🛠️"
+          }
+        });
+      } catch (err) {
+        console.error("Mock agent reply error:", err);
+      }
+    }, 1500);
+
+    return res.json({ message: newMessage });
+  } catch (error) {
+    console.error("Send support message error:", error);
+    return res.status(500).json({ error: "Failed to send message." });
   }
 });
 

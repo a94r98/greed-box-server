@@ -23,6 +23,8 @@ model User {
   avatar             String                  @default("avatar_1")
   age                Int?
   gender             String?                 // MALE, FEMALE
+  bio                String?
+  whatsapp           String?
   phoneNumber        String?                 // Phone number without country code
   countryCode        String?                 // e.g. +964, +966, +971
   lastLoginAt        DateTime?               // Last login timestamp
@@ -47,6 +49,7 @@ model User {
   
   invitationsSent    Referral[]              @relation("InviterRelation")
   invitationReceived Referral?               @relation("InviteeRelation")
+  supportMessages    SupportMessage[]
 }
 
 model Wallet {
@@ -190,6 +193,8 @@ model SystemConfig {
   inviteRewardInvitee    Float    @default(200.0)
   dailyInviteLimit       Int      @default(5)
   isReferralActive       Boolean  @default(true)
+  supportTelegram        String   @default("")
+  supportWhatsApp        String   @default("")
 }
 
 model HousePool {
@@ -245,4 +250,15 @@ model RoundSnapshot {
   createdAt        DateTime @default(now())
   
   round            Round    @relation(fields: [roundId], references: [id], onDelete: Cascade)
+}
+
+model SupportMessage {
+  id        String   @id @default(uuid())
+  userId    String
+  sender    String   // USER, AGENT
+  message   String?
+  imageUrl  String?
+  createdAt DateTime @default(now())
+  
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

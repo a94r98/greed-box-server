@@ -213,21 +213,55 @@ router.post("/register", async (req, res): Promise<any> => {
         }
       });
 
+      const rewardInviter = config?.inviteRewardInviter ?? 500.0;
+      const rewardInvitee = config?.inviteRewardInvitee ?? 200.0;
+
       // Wallet Initializer
       await tx.wallet.create({
         data: {
           userId: newUser.id,
-          freeBalance: 1000.0, // Default Coins
-          cashBalance: 0.0
+          freeBalance: 1000.0, // Default Diamonds (FREE)
+          cashBalance: inviterId ? rewardInvitee : 0.0 // Default Coins (CASH)
         }
       });
 
       if (inviterId) {
+        // Credit inviter wallet
+        const inviterWallet = await tx.wallet.findUnique({ where: { userId: inviterId } });
+        if (inviterWallet) {
+          await tx.wallet.update({
+            where: { userId: inviterId },
+            data: { cashBalance: inviterWallet.cashBalance + rewardInviter }
+          });
+        }
+
+        // Create referral relation
         await tx.referral.create({
           data: {
             inviterId,
             inviteeId: newUser.id,
-            bonusPaid: false
+            bonusPaid: true
+          }
+        });
+
+        // Create transaction logs
+        await tx.transaction.create({
+          data: {
+            userId: inviterId,
+            amount: rewardInviter,
+            currency: 'CASH',
+            type: 'REFERRAL_BONUS',
+            description: `كود دعوة: مكافأة دعوة مستخدم جديد (${newUser.displayNickname || newUser.username})`
+          }
+        });
+
+        await tx.transaction.create({
+          data: {
+            userId: newUser.id,
+            amount: rewardInvitee,
+            currency: 'CASH',
+            type: 'REFERRAL_BONUS',
+            description: `كود دعوة: مكافأة تسجيل باستخدام كود دعوة`
           }
         });
       }
