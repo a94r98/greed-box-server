@@ -23,6 +23,8 @@ router.get("/stats", async (req: AuthenticatedRequest, res: Response) => {
     const cashPool = await prisma.housePool.findUnique({ where: { type: "CASH" } });
     
     const usersCount = await prisma.user.count();
+    const usersOnline = gameEngine.getOnlinePlayersCount();
+
     const pendingDeposits = await prisma.deposit.count({ where: { status: "PENDING" } });
     const pendingWithdrawals = await prisma.withdrawal.count({ where: { status: "PENDING" } });
 
@@ -37,6 +39,23 @@ router.get("/stats", async (req: AuthenticatedRequest, res: Response) => {
     `;
     const todayCashRevenueVal = todayCashRevenueRows[0]?.sum ? parseFloat(todayCashRevenueRows[0].sum) : 0.0;
 
+    // Get total coins and diamonds across all users
+    const totalsRows = await prisma.$queryRaw`
+      SELECT SUM("cashBalance") as cash, SUM("freeBalance") as free
+      FROM "Wallet"
+    `;
+    const totalUserCoins = totalsRows[0]?.cash ? parseFloat(totalsRows[0].cash) : 0;
+    const totalUserDiamonds = totalsRows[0]?.free ? parseFloat(totalsRows[0].free) : 0;
+
+    // Mock store stats (pending DB tables)
+    const storeStats = {
+      productsCount: 0,
+      totalOrders: 0,
+      pendingOrders: 0,
+      approvedOrders: 0,
+      rejectedOrders: 0
+    };
+
     return res.json({
       activeRound,
       pools: {
@@ -45,12 +64,16 @@ router.get("/stats", async (req: AuthenticatedRequest, res: Response) => {
       },
       counts: {
         users: usersCount,
+        usersOnline,
         pendingDeposits,
-        pendingWithdrawals
+        pendingWithdrawals,
+        totalUserCoins,
+        totalUserDiamonds
       },
       revenue: {
         todayCash: todayCashRevenueVal
-      }
+      },
+      store: storeStats
     });
   } catch (err) {
     return res.status(500).json({ error: "Failed to load admin stats." });
@@ -554,6 +577,7 @@ router.post("/deposits/:id/approve", async (req: AuthenticatedRequest, res: Resp
       await trackTaskProgress(deposit.userId, "DEPOSIT", 1);
       await trackTaskProgress(deposit.userId, "FIRST_DEPOSIT", 1);
       await trackTaskProgress(deposit.userId, "DEPOSIT_TOTAL_AMOUNT", Math.round(deposit.amount));
+      await trackTaskProgress(deposit.userId, "CHARGE_COINS", Math.round(deposit.amount * 1000000));
     } catch (taskErr) {
       console.error("Error updating tasks on deposit approval:", taskErr);
     }
@@ -748,7 +772,12 @@ router.put("/config", requireSuperAdmin, async (req: AuthenticatedRequest, res: 
     dailyInviteLimit,
     isReferralActive,
     supportTelegram,
-    supportWhatsApp
+    supportWhatsApp,
+    socialFacebook,
+    socialInstagram,
+    socialTikTok,
+    socialWhatsApp,
+    socialTelegram
   } = req.body;
 
   try {
@@ -770,7 +799,12 @@ router.put("/config", requireSuperAdmin, async (req: AuthenticatedRequest, res: 
         dailyInviteLimit,
         isReferralActive,
         supportTelegram: supportTelegram || "",
-        supportWhatsApp: supportWhatsApp || ""
+        supportWhatsApp: supportWhatsApp || "",
+        socialFacebook: socialFacebook || "",
+        socialInstagram: socialInstagram || "",
+        socialTikTok: socialTikTok || "",
+        socialWhatsApp: socialWhatsApp || "",
+        socialTelegram: socialTelegram || ""
       }
     });
 

@@ -40,13 +40,18 @@ export class GameEngine {
   // Cached winner details for instant broadcast
   private currentWinningBox: number | null = null;
   private currentWinningMultiplier: number | null = null;
+  private currentTopWinners: any[] = [];
 
   constructor() {
     this.currentStatus = RoundState.ENDED;
   }
 
-  public setIo(io: Server) {
-    this.io = io;
+  public setIo(ioServer: Server) {
+    this.io = ioServer;
+  }
+
+  getOnlinePlayersCount(): number {
+    return this.io ? this.io.engine.clientsCount : 0;
   }
 
   public getIo(): Server | null {
@@ -116,6 +121,50 @@ export class GameEngine {
     this.overrideBox = box;
     this.overrideAdminId = adminId;
     this.overrideReason = reason;
+  }
+
+  // Returns the last 12:01 PM AST (09:01 AM UTC) cutoff
+  public getTodayResetTime(): Date {
+    const now = new Date();
+    let cutoff = new Date(now);
+    cutoff.setUTCHours(9, 1, 0, 0);
+    if (now.getTime() < cutoff.getTime()) {
+      cutoff.setUTCDate(cutoff.getUTCDate() - 1);
+    }
+    return cutoff;
+  }
+
+    // Helper method to emit comprehensive wallet state (including daily wins)
+  public async emitWalletUpdate(userId: string) {
+    const wallet = await prisma.wallet.findUnique({ where: { userId } });
+    if (!wallet) return;
+
+    const resetTime = this.getTodayResetTime();
+    
+    // Calculate total winnings for today's cycle
+    const betStats = await prisma.bet.groupBy({
+      by: ['currency'],
+      where: {
+        userId,
+        createdAt: { gte: resetTime }
+      },
+      _sum: { winAmount: true, amount: true }
+    });
+
+    let dailyFreeWin = 0;
+    let dailyCashWin = 0;
+    for (const stat of betStats) {
+      const profit = (stat._sum.winAmount || 0) - (stat._sum.amount || 0);
+      if (stat.currency === 'FREE') dailyFreeWin = profit > 0 ? profit : 0;
+      if (stat.currency === 'CASH') dailyCashWin = profit > 0 ? profit : 0;
+    }
+
+    this.io?.to(`user:${userId}`).emit("wallet_update", {
+      freeBalance: wallet.freeBalance,
+      cashBalance: wallet.cashBalance,
+      dailyFreeWin,
+      dailyCashWin
+    });
   }
 
   // Place bet function (Idempotency, Isolation, Validation)
@@ -236,10 +285,7 @@ export class GameEngine {
 
     // Emit wallet update to the user's socket room
     try {
-      this.io?.to(`user:${userId}`).emit("wallet_update", {
-        freeBalance: betResult.wallet.freeBalance,
-        cashBalance: betResult.wallet.cashBalance
-      });
+      await this.emitWalletUpdate(userId);
     } catch (wsErr) {
       console.error("Failed to emit wallet update socket:", wsErr);
     }
@@ -334,6 +380,7 @@ export class GameEngine {
     this.overrideReason = null;
     this.currentWinningBox = null;
     this.currentWinningMultiplier = null;
+    this.currentTopWinners = [];
 
     // 4. Alternate currency mode depending on settings
     const isFree = config?.isFreeEnabled ?? true;
@@ -347,15 +394,22 @@ export class GameEngine {
       this.currentCurrencyMode = "FREE";
     }
 
-    // 5. Create new database Round entry
-    this.sequenceNumber++;
-    const newRound = await prisma.round.create({
-      data: {
-        status: RoundState.BETTING,
-        currencyMode: this.currentCurrencyMode === "BOTH" ? "BOTH" : (this.currentCurrencyMode === "FREE" ? "FREE_ONLY" : "CASH_ONLY"),
-        sequenceNumber: this.sequenceNumber
-      }
-    });
+      // Calculate sequence number: Reset daily at 12:01 PM (UTC+3) -> 09:01 AM UTC
+      let cutoff = this.getTodayResetTime();
+      
+      const sequenceCount = await prisma.round.count({
+        where: { startAt: { gte: cutoff } }
+      });
+      this.sequenceNumber = sequenceCount + 1;
+
+      // 5. Create new database Round entry
+      const newRound = await prisma.round.create({
+        data: {
+          status: RoundState.BETTING,
+          currencyMode: this.currentCurrencyMode === "BOTH" ? "BOTH" : (this.currentCurrencyMode === "FREE" ? "FREE_ONLY" : "CASH_ONLY"),
+          sequenceNumber: this.sequenceNumber
+        }
+      });
 
     this.currentRoundId = newRound.id;
     this.currentStatus = RoundState.BETTING;
@@ -427,6 +481,13 @@ export class GameEngine {
       this.currentStatus = RoundState.REVEALING;
       this.startPhaseTimer(3); // 3s opening box
       this.broadcastState();
+
+      this.io?.emit("round_reveal", {
+        roundId: this.currentRoundId,
+        winningBox: this.currentWinningBox,
+        winningMultiplier: this.currentWinningMultiplier,
+        topWinners: this.currentTopWinners
+      });
       
       this.runTick();
 
@@ -532,6 +593,41 @@ export class GameEngine {
 
       this.currentWinningBox = calculation.winningBox;
       this.currentWinningMultiplier = calculation.winningMultiplier;
+
+      // Pre-calculate top winners for REVEALING phase from activeBets memory
+      const winnersMap = new Map<string, number>();
+      this.activeBets.forEach((bets, userId) => {
+        let winAmount = 0;
+        bets.forEach(b => {
+          if (b.boxIndex === calculation.winningBox) {
+            winAmount += b.amount * calculation.winningMultiplier;
+          }
+        });
+        if (winAmount > 0) {
+          winnersMap.set(userId, winAmount);
+        }
+      });
+
+      const winnersList = Array.from(winnersMap.entries())
+        .map(([userId, winAmount]) => ({ userId, winAmount }))
+        .sort((a, b) => b.winAmount - a.winAmount)
+        .slice(0, 3);
+
+      this.currentTopWinners = [];
+      for (const w of winnersList) {
+        try {
+          const user = await prisma.user.findUnique({ where: { id: w.userId } });
+          if (user) {
+            this.currentTopWinners.push({
+              username: user.username || "لاعب",
+              avatar: user.avatar || "avatar_1",
+              winAmount: w.winAmount
+            });
+          }
+        } catch (err) {
+          console.error("Error fetching top winner details:", err);
+        }
+      }
 
       // Update Round info in DB
       await prisma.round.update({
@@ -723,15 +819,9 @@ export class GameEngine {
 
         // Emit updated wallets to all users who placed bets in this round
         try {
-          const uniqueUserIds = Array.from(new Set(roundBets.map(b => b.userId)));
+          const uniqueUserIds: string[] = Array.from(new Set(roundBets.map(b => b.userId)));
           for (const uId of uniqueUserIds) {
-            const wallet = await prisma.wallet.findUnique({ where: { userId: uId } });
-            if (wallet) {
-              this.io?.to(`user:${uId}`).emit("wallet_update", {
-                freeBalance: wallet.freeBalance,
-                cashBalance: wallet.cashBalance
-              });
-            }
+            await this.emitWalletUpdate(uId);
           }
         } catch (wsErr) {
           console.error("Failed to emit wallet updates after round end:", wsErr);
@@ -798,30 +888,6 @@ export class GameEngine {
       }
 
       console.log(`[Round Engine] Completed payouts. Total Free Bets: ${totalBetsFreeVolume}, Total Cash Bets: ${totalBetsCashVolume}`);
-      
-      let topWinners: any[] = [];
-      try {
-        const roundWinners = await prisma.bet.findMany({
-          where: { roundId: this.currentRoundId, status: "WON" },
-          orderBy: { winAmount: "desc" },
-          take: 3,
-          include: { user: true }
-        });
-        topWinners = roundWinners.map(w => ({
-          username: w.user.username || "لاعب",
-          avatar: w.user.avatar || "avatar_1",
-          winAmount: w.winAmount
-        }));
-      } catch (err) {
-        console.error("Error fetching top winners for round:", err);
-      }
-
-      this.io?.emit("round_reveal", {
-        roundId: this.currentRoundId,
-        winningBox,
-        winningMultiplier: multiplier,
-        topWinners
-      });
 
       await logEvent({
         roundId: this.currentRoundId,

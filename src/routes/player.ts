@@ -20,6 +20,9 @@ router.get("/profile", authenticateToken, async (req: AuthenticatedRequest, res:
       return res.status(404).json({ error: "User profile not found." });
     }
 
+    const { trackTaskProgress } = require("../taskTracker");
+    await trackTaskProgress(userId, "DAILY_LOGIN", 1);
+
     const wallet = await prisma.wallet.findUnique({
       where: { userId }
     });
@@ -44,6 +47,24 @@ router.get("/profile", authenticateToken, async (req: AuthenticatedRequest, res:
       }
     });
 
+    const resetTime = require("../gameEngine").gameEngine.getTodayResetTime();
+    const betStats = await prisma.bet.groupBy({
+      by: ['currency'],
+      where: {
+        userId,
+        createdAt: { gte: resetTime }
+      },
+      _sum: { winAmount: true, amount: true }
+    });
+
+    let dailyFreeWin = 0;
+    let dailyCashWin = 0;
+    for (const stat of betStats) {
+      const profit = (stat._sum.winAmount || 0) - (stat._sum.amount || 0);
+      if (stat.currency === 'FREE') dailyFreeWin = profit > 0 ? profit : 0;
+      if (stat.currency === 'CASH') dailyCashWin = profit > 0 ? profit : 0;
+    }
+
     return res.json({
       profile: {
         id: user.id,
@@ -64,7 +85,9 @@ router.get("/profile", authenticateToken, async (req: AuthenticatedRequest, res:
         roundsWon: user.roundsWon,
         wallet: {
           freeBalance: wallet?.freeBalance || 0.0,
-          cashBalance: wallet?.cashBalance || 0.0
+          cashBalance: wallet?.cashBalance || 0.0,
+          dailyFreeWin,
+          dailyCashWin
         },
         stats: {
           totalProfitFree,
@@ -103,6 +126,11 @@ router.put("/profile", authenticateToken, async (req: AuthenticatedRequest, res:
       data: dataToUpdate
     });
 
+    if (avatar !== undefined) {
+      const { trackTaskProgress } = require("../taskTracker");
+      await trackTaskProgress(userId, "PROFILE_AVATAR", 1);
+    }
+
     return res.json({
       message: "Profile updated successfully.",
       user: {
@@ -138,6 +166,10 @@ router.put("/profile/avatar", authenticateToken, async (req: AuthenticatedReques
       where: { id: userId },
       data: { avatar }
     });
+    
+    const { trackTaskProgress } = require("../taskTracker");
+    await trackTaskProgress(userId, "PROFILE_AVATAR", 1);
+    
     return res.json({ message: "Avatar updated.", avatar: updated.avatar });
   } catch (error) {
     return res.status(500).json({ error: "Failed to update avatar." });
@@ -242,7 +274,11 @@ router.get("/rankings", authenticateToken, async (req: AuthenticatedRequest, res
     }));
     formatted.sort((a: any, b: any) => b.totalWagered - a.totalWagered);
 
-    // 3. Fetch all user details to merge profiles
+    // 3. Fetch all user details and get track progress for open rankings
+    if (userId) {
+      const { trackTaskProgress } = require("../taskTracker");
+      await trackTaskProgress(userId, "OPEN_RANKINGS", 1);
+    }
     const users = await prisma.user.findMany();
 
     const rankings = formatted.map((item: any, idx: number) => {
@@ -310,6 +346,8 @@ router.get("/tasks", authenticateToken, async (req: AuthenticatedRequest, res: R
       where: { userId }
     });
 
+    const sysConfig = await prisma.systemConfig.findUnique({ where: { id: "singleton" } });
+
     const now = new Date();
     const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
@@ -336,6 +374,15 @@ router.get("/tasks", authenticateToken, async (req: AuthenticatedRequest, res: R
 
     const response = tasks.map(task => {
       let progress = updatedProgressList.find(p => p.taskId === task.id);
+      let dynamicLink = task.linkUrl;
+      if (sysConfig) {
+        if (task.actionType === "FOLLOW_FACEBOOK") dynamicLink = sysConfig.socialFacebook;
+        else if (task.actionType === "FOLLOW_INSTAGRAM") dynamicLink = sysConfig.socialInstagram;
+        else if (task.actionType === "FOLLOW_TIKTOK") dynamicLink = sysConfig.socialTikTok;
+        else if (task.actionType === "FOLLOW_WHATSAPP") dynamicLink = sysConfig.socialWhatsApp;
+        else if (task.actionType === "FOLLOW_TELEGRAM") dynamicLink = sysConfig.socialTelegram;
+      }
+
       return {
         id: task.id,
         key: task.key,
@@ -346,7 +393,7 @@ router.get("/tasks", authenticateToken, async (req: AuthenticatedRequest, res: R
         rewardCurrency: task.rewardCurrency,
         type: task.type,
         actionType: task.actionType,
-        linkUrl: task.linkUrl,
+        linkUrl: dynamicLink,
         count: progress?.count || 0,
         isCompleted: progress?.isCompleted || false,
         isClaimed: progress?.claimedAt !== null && progress?.claimedAt !== undefined
@@ -949,6 +996,42 @@ router.get("/support/config", authenticateToken, async (req: AuthenticatedReques
   } catch (error) {
     console.error("Get support config error:", error);
     return res.status(500).json({ error: "Failed to load support configuration." });
+  }
+});
+
+// Watch Ad Reward
+router.post("/watch-ad", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const rewardAmount = 3000000.0;
+    await prisma.$transaction(async (tx) => {
+      // 1. Update wallet
+      const wallet = await tx.wallet.findUnique({ where: { userId } });
+      if (!wallet) throw new Error("Wallet not found");
+
+      await tx.wallet.update({
+        where: { userId },
+        data: { freeBalance: wallet.freeBalance + rewardAmount }
+      });
+
+      // 2. Add history
+      await tx.history.create({
+        data: {
+          userId,
+          amount: rewardAmount,
+          currency: "FREE",
+          type: "AD_REWARD",
+          description: "مكافأة مشاهدة إعلان"
+        }
+      });
+    });
+
+    return res.json({ success: true, message: "تم منح المكافأة بنجاح", amount: rewardAmount });
+  } catch (error) {
+    console.error("Watch ad reward error:", error);
+    return res.status(500).json({ error: "فشل منح المكافأة" });
   }
 });
 

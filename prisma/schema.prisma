@@ -195,6 +195,11 @@ model SystemConfig {
   isReferralActive       Boolean  @default(true)
   supportTelegram        String   @default("")
   supportWhatsApp        String   @default("")
+  socialFacebook         String   @default("")
+  socialInstagram        String   @default("")
+  socialTikTok           String   @default("")
+  socialWhatsApp         String   @default("")
+  socialTelegram         String   @default("")
 }
 
 model HousePool {

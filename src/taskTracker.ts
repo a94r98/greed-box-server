@@ -82,19 +82,16 @@ export async function trackTaskProgress(userId: string, actionType: string, incr
           where: { userId }
         });
 
-        let allSocialsCompleted = true;
+        let completedSocialCount = 1; // this one is completed
         for (const s of otherSocials) {
           if (s.key === task.key) continue; // we know this one is completed
           const p = otherProgress.find(op => op.taskId === s.id);
-          if (!p || !p.isCompleted) {
-            allSocialsCompleted = false;
-            break;
+          if (p && p.isCompleted) {
+            completedSocialCount++;
           }
         }
 
-        if (allSocialsCompleted) {
-          await trackTaskProgress(userId, "SOCIAL_JOIN_ALL", 1);
-        }
+        await trackTaskProgress(userId, "SOCIAL_JOIN_ALL", 1, completedSocialCount);
       }
     }
   } catch (error) {
