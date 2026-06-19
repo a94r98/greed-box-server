@@ -819,6 +819,40 @@ router.put("/config", requireSuperAdmin, async (req: AuthenticatedRequest, res: 
   }
 });
 
+// 6.5 Rounds History
+router.get("/rounds/recent", async (req, res) => {
+  try {
+    const rounds = await prisma.$queryRaw`
+      SELECT id, "sequenceNumber", status, "currencyMode", "startAt", "winningMultiplier"
+      FROM "Round"
+      WHERE status = 'ENDED'
+      ORDER BY "sequenceNumber" DESC
+      LIMIT 30
+    `;
+    return res.json({ rounds });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch recent rounds." });
+  }
+});
+
+router.get("/rounds/:id/players", async (req, res) => {
+  try {
+    const roundId = req.params.id;
+    const bets = await prisma.$queryRaw`
+      SELECT 
+        b.id as "betId", b.amount, b."winAmount", b.currency, b.status, b."boxIndex",
+        u."publicId" as "playerId"
+      FROM "Bet" b
+      JOIN "User" u ON b."userId" = u.id
+      WHERE b."roundId" = ${roundId}
+      ORDER BY b.amount DESC
+    `;
+    return res.json({ bets });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch round players." });
+  }
+});
+
 // 7. House Pool logs
 router.get("/pool/logs", async (req, res) => {
   try {
