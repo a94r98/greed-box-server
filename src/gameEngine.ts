@@ -64,8 +64,8 @@ export class GameEngine {
       remainingMs,
       sequenceNumber: this.sequenceNumber,
       serverTimestamp: Date.now(),
-      winningBox: (this.currentStatus === RoundState.REVEALING || this.currentStatus === RoundState.FINALIZING) ? this.currentWinningBox : null,
-      winningMultiplier: (this.currentStatus === RoundState.REVEALING || this.currentStatus === RoundState.FINALIZING) ? this.currentWinningMultiplier : null
+      winningBox: (this.currentStatus === RoundState.CALCULATING || this.currentStatus === RoundState.REVEALING || this.currentStatus === RoundState.FINALIZING) ? this.currentWinningBox : null,
+      winningMultiplier: (this.currentStatus === RoundState.CALCULATING || this.currentStatus === RoundState.REVEALING || this.currentStatus === RoundState.FINALIZING) ? this.currentWinningMultiplier : null
     };
   }
 
@@ -324,7 +324,7 @@ export class GameEngine {
 
     // 2. Read config
     const config = await prisma.systemConfig.findUnique({ where: { id: "singleton" } });
-    const bettingDuration = config?.roundDurationBetting || 20;
+    const bettingDuration = 25; // Hardcoded to 25 seconds per user request
 
     // 3. Clear local caches
     this.activeBets.clear();
@@ -398,8 +398,6 @@ export class GameEngine {
   }
 
   private async transitionState() {
-    const config = await prisma.systemConfig.findUnique({ where: { id: "singleton" } });
-    
     if (this.currentStatus === RoundState.BETTING) {
       // Lock bets
       this.currentStatus = RoundState.LOCKED;
@@ -417,30 +415,30 @@ export class GameEngine {
 
       // Go immediately to calculating
       this.currentStatus = RoundState.CALCULATING;
-      this.startPhaseTimer(config?.roundDurationCalcul || 3);
+      this.startPhaseTimer(7); // 7s countdown
       this.broadcastState();
       
-      // Process calculations
-      await this.processCalculation();
       this.runTick();
+      // Process calculations in background to prevent freezing timer
+      this.processCalculation().catch(e => console.error("Calculation Error:", e));
 
     } else if (this.currentStatus === RoundState.CALCULATING) {
-      // Calculations are finished, transition directly to finalization / results popup
-      this.currentStatus = RoundState.FINALIZING;
-      this.startPhaseTimer(4); // 4 seconds results window duration
+      // Transition to revealing (opening box)
+      this.currentStatus = RoundState.REVEALING;
+      this.startPhaseTimer(3); // 3s opening box
       this.broadcastState();
       
-      await this.processFinalization();
       this.runTick();
 
     } else if (this.currentStatus === RoundState.REVEALING) {
       // Begin Payout Distribution
       this.currentStatus = RoundState.FINALIZING;
-      this.startPhaseTimer(5); // 5 seconds results window duration
+      this.startPhaseTimer(15); // 15s results window duration
       this.broadcastState();
       
-      await this.processFinalization();
       this.runTick();
+      // Process finalization in background
+      this.processFinalization().catch(e => console.error("Finalization Error:", e));
 
     } else if (this.currentStatus === RoundState.FINALIZING) {
       // Finished finalization, transition to ended
@@ -449,13 +447,18 @@ export class GameEngine {
       
       // Restart loop
       setTimeout(async () => {
-        // Verify maintenance mode
-        const liveConfig = await prisma.systemConfig.findUnique({ where: { id: "singleton" } });
-        if (liveConfig?.isMaintenanceMode) {
-          console.log("[Round Engine] Maintenance Mode active. Game engine paused.");
-          this.io?.emit("maintenance_alert", { message: liveConfig.maintenanceMessage });
-        } else {
-          await this.nextRound();
+        try {
+          // Verify maintenance mode
+          const liveConfig = await prisma.systemConfig.findUnique({ where: { id: "singleton" } });
+          if (liveConfig?.isMaintenanceMode) {
+            console.log("[Round Engine] Maintenance Mode active. Game engine paused.");
+            this.io?.emit("maintenance_alert", { message: liveConfig.maintenanceMessage });
+          } else {
+            await this.nextRound();
+          }
+        } catch (e) {
+          console.error("Error starting next round, retrying in 5s...", e);
+          setTimeout(() => this.nextRound().catch(console.error), 5000);
         }
       }, 1000);
     }
@@ -486,7 +489,9 @@ export class GameEngine {
       const allBetsList: SimulatedBet[] = [];
       this.activeBets.forEach((bets) => {
         bets.forEach(b => {
-          allBetsList.push({ boxIndex: b.boxIndex, amount: b.amount });
+          if (b.currency === "CASH" || activeCalcMode === "FREE") {
+            allBetsList.push({ boxIndex: b.boxIndex, amount: b.amount });
+          }
         });
       });
 
@@ -537,6 +542,8 @@ export class GameEngine {
           status: RoundState.CALCULATING
         }
       });
+      
+      this.broadcastState();
 
       if (calculation.isOverride) {
         await logEvent({
@@ -894,8 +901,8 @@ export class GameEngine {
       remainingMs,
       sequenceNumber: this.sequenceNumber,
       serverTimestamp: Date.now(),
-      winningBox: (this.currentStatus === RoundState.REVEALING || this.currentStatus === RoundState.FINALIZING) ? this.currentWinningBox : null,
-      winningMultiplier: (this.currentStatus === RoundState.REVEALING || this.currentStatus === RoundState.FINALIZING) ? this.currentWinningMultiplier : null
+      winningBox: (this.currentStatus === RoundState.CALCULATING || this.currentStatus === RoundState.REVEALING || this.currentStatus === RoundState.FINALIZING) ? this.currentWinningBox : null,
+      winningMultiplier: (this.currentStatus === RoundState.CALCULATING || this.currentStatus === RoundState.REVEALING || this.currentStatus === RoundState.FINALIZING) ? this.currentWinningMultiplier : null
     });
   }
 }
