@@ -25,10 +25,28 @@ type DataClause  = Record<string, any>;
 function buildWhereSQL(where: WhereClause): { clause: string; params: any[] } {
   const keys = Object.keys(where);
   const params: any[] = [];
-  const parts = keys.map((k, i) => {
-    params.push(where[k]);
-    return `"${k}" = $${i + 1}`;
-  });
+  const parts: string[] = [];
+
+  for (const k of keys) {
+    if (k === "OR" && Array.isArray(where[k])) {
+      const orParts = where[k].map((cond: any) => {
+        const cKey = Object.keys(cond)[0];
+        params.push(cond[cKey]);
+        return `"${cKey}" = $${params.length}`;
+      });
+      parts.push(`(${orParts.join(" OR ")})`);
+    } else if (where[k] && typeof where[k] === "object" && !Array.isArray(where[k])) {
+      // Basic support for gte, in, etc., if needed, but let's handle gte for now
+      if (where[k].gte !== undefined) {
+        params.push(where[k].gte);
+        parts.push(`"${k}" >= $${params.length}`);
+      }
+    } else {
+      params.push(where[k]);
+      parts.push(`"${k}" = $${params.length}`);
+    }
+  }
+
   return { clause: parts.length ? `WHERE ${parts.join(" AND ")}` : "", params };
 }
 
