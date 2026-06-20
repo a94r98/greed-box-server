@@ -337,17 +337,6 @@ router.put("/users/:id/balance", async (req: AuthenticatedRequest, res: Response
           }
         });
 
-      // Record Revenue in FinanceLog automatically
-      await tx.financeLog.create({
-        data: {
-          type: "REVENUE",
-          category: "STORE",
-          amount: deposit.amount,
-          currency: "USD",
-          description: `شحن رصيد نقدي للمستخدم ${deposit.userId}`
-        }
-      });
-
       }
 
       if (cashDiff !== 0) {
@@ -1282,5 +1271,44 @@ router.post("/store/orders/:id/reject", async (req: AuthenticatedRequest, res: R
     return res.json({ success: true, order });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || "Failed to reject order" });
+  }
+});
+
+// Shipping Requests Management
+router.get("/shipping/requests", async (req, res) => {
+  try {
+    const requests = await prisma.shippingRequest.findMany({
+      include: { user: { select: { id: true, publicId: true, username: true, phone: true } } },
+      orderBy: { createdAt: "desc" }
+    });
+    return res.json({ requests });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch shipping requests" });
+  }
+});
+
+router.post("/shipping/requests/:id/approve", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  try {
+    const { adminNote } = req.body;
+    const request = await prisma.shippingRequest.update({
+      where: { id: req.params.id },
+      data: { status: "APPROVED", adminNote }
+    });
+    return res.json({ success: true, request });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to approve shipping request" });
+  }
+});
+
+router.post("/shipping/requests/:id/reject", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  try {
+    const { adminNote } = req.body;
+    const updatedRequest = await prisma.shippingRequest.update({
+      where: { id: req.params.id },
+      data: { status: "REJECTED", adminNote }
+    });
+    return res.json({ success: true, request: updatedRequest });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || "Failed to reject" });
   }
 });
