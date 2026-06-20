@@ -185,6 +185,7 @@ export const prisma = {
   round:                 makeModel("Round"),
   bet:                   makeModel("Bet"),
   transaction:           makeModel("Transaction"),
+  financeLog:            makeModel("FinanceLog"),
   deposit:               makeModel("Deposit"),
   withdrawal:            makeModel("Withdrawal"),
   referral:              makeModel("Referral"),

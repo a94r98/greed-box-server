@@ -200,6 +200,7 @@ model SystemConfig {
   socialTikTok           String   @default("")
   socialWhatsApp         String   @default("")
   socialTelegram         String   @default("")
+  exchangeRateIqd        Float    @default(1600.0)
 }
 
 model HousePool {
@@ -266,4 +267,14 @@ model SupportMessage {
   createdAt DateTime @default(now())
   
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model FinanceLog {
+  id          String   @id @default(uuid())
+  type        String   // REVENUE, EXPENSE
+  category    String   // SERVER, ADS, STORE, GAME, MANUAL
+  amount      Float
+  currency    String   // IQD, USD, COINS
+  description String?
+  createdAt   DateTime @default(now())
 }

@@ -55,6 +55,19 @@ router.get("/stats", async (req: AuthenticatedRequest, res: Response) => {
       approvedOrders: 0,
       rejectedOrders: 0
     };
+    // Calculate total admin profits
+    const adminProfitsRows: any[] = await prisma.$queryRaw`
+      SELECT "poolType", SUM(ABS("amountChange")) as sum
+      FROM "HousePoolLog"
+      WHERE type = 'ADMIN_PROFIT_WITHDRAWAL'
+      GROUP BY "poolType"
+    `;
+    let adminProfits = { cash: 0, free: 0 };
+    adminProfitsRows.forEach(r => {
+      if (r.poolType === 'CASH') adminProfits.cash = parseFloat(r.sum || "0");
+      if (r.poolType === 'FREE') adminProfits.free = parseFloat(r.sum || "0");
+    });
+
 
     return res.json({
       activeRound,
@@ -62,6 +75,7 @@ router.get("/stats", async (req: AuthenticatedRequest, res: Response) => {
         free: freePool?.balance || 0,
         cash: cashPool?.balance || 0
       },
+      adminProfits,
       counts: {
         users: usersCount,
         usersOnline,
@@ -777,7 +791,8 @@ router.put("/config", requireSuperAdmin, async (req: AuthenticatedRequest, res: 
     socialInstagram,
     socialTikTok,
     socialWhatsApp,
-    socialTelegram
+    socialTelegram,
+    exchangeRateIqd
   } = req.body;
 
   try {
@@ -863,6 +878,64 @@ router.get("/pool/logs", async (req, res) => {
     return res.json({ logs });
   } catch (err) {
     return res.status(500).json({ error: "Failed to load pool logs." });
+  }
+});
+
+
+// 7.5 Admin Profits
+router.post("/pool/withdraw", requireSuperAdmin, async (req, res) => {
+  const { poolType, amount } = req.body;
+  if (!poolType || !amount || amount <= 0) {
+    return res.status(400).json({ error: "Invalid withdrawal parameters." });
+  }
+
+  try {
+    const pool = await prisma.housePool.findUnique({ where: { type: poolType } });
+    if (!pool || pool.balance < amount) {
+      return res.status(400).json({ error: "Insufficient pool balance." });
+    }
+
+    const updatedPool = await prisma.housePool.update({
+      where: { type: poolType },
+      data: { balance: pool.balance - amount }
+    });
+
+    await prisma.housePoolLog.create({
+      data: {
+        poolType,
+        amountChange: -amount,
+        type: "ADMIN_PROFIT_WITHDRAWAL",
+        referenceId: "admin"
+      }
+    });
+
+    await prisma.financeLog.create({
+      data: {
+        type: "REVENUE",
+        category: "GAME",
+        amount,
+        currency: poolType === "CASH" ? "COINS" : "FREE",
+        description: `سحب أرباح من الصندوق الأسود (${poolType === "CASH" ? "كونزات" : "ماسات"})`
+      }
+    });
+
+    return res.json({ message: "Withdrawal successful", pool: updatedPool });
+  } catch (err) {
+    console.error("Pool withdraw error:", err);
+    return res.status(500).json({ error: "Failed to withdraw from pool." });
+  }
+});
+
+router.get("/profits/logs", async (req, res) => {
+  try {
+    const logs = await prisma.housePoolLog.findMany({
+      where: { type: "ADMIN_PROFIT_WITHDRAWAL" },
+      orderBy: { createdAt: "desc" },
+      take: 100
+    });
+    return res.json({ logs });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch profit logs." });
   }
 });
 
@@ -985,4 +1058,70 @@ router.post("/simulation", async (req: AuthenticatedRequest, res: Response): Pro
   }
 });
 
+
+// ─── SMART FINANCIAL SYSTEM ──────────────────────────────────────────────────
+
+router.post("/finance/log", requireSuperAdmin, async (req, res) => {
+  try {
+    const { type, category, amount, currency, description } = req.body;
+    if (!type || !category || amount == null || !currency) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const log = await prisma.financeLog.create({
+      data: {
+        type,
+        category,
+        amount: Number(amount),
+        currency,
+        description: description || ""
+      }
+    });
+
+    return res.json({ success: true, log });
+  } catch (err) {
+    console.error("Failed to log finance:", err);
+    return res.status(500).json({ error: "Failed to log finance." });
+  }
+});
+
+router.get("/finance/stats", requireSuperAdmin, async (req, res) => {
+  try {
+    const logs = await prisma.financeLog.findMany({ orderBy: { createdAt: "desc" } });
+    const config = await prisma.systemConfig.findUnique({ where: { id: "singleton" } });
+    const iqdRate = config?.exchangeRateIqd || 1600;
+
+    let totalRevenueIqd = 0;
+    let totalExpenseIqd = 0;
+
+    for (const log of logs) {
+      // Normalize to IQD for calculation
+      let amountIqd = log.amount;
+      if (log.currency === "USD") {
+        amountIqd = log.amount * iqdRate;
+      } else if (log.currency === "COINS") {
+        amountIqd = log.amount * (iqdRate / 3000000);
+      }
+
+      if (log.type === "REVENUE") totalRevenueIqd += amountIqd;
+      if (log.type === "EXPENSE") totalExpenseIqd += amountIqd;
+    }
+
+    const netProfitIqd = totalRevenueIqd - totalExpenseIqd;
+
+    return res.json({
+      success: true,
+      logs,
+      exchangeRateIqd: iqdRate,
+      totalRevenueIqd,
+      totalExpenseIqd,
+      netProfitIqd
+    });
+  } catch (err) {
+    console.error("Failed to fetch finance stats:", err);
+    return res.status(500).json({ error: "Failed to fetch finance stats." });
+  }
+});
+
 export default router;
+
