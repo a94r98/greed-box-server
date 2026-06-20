@@ -336,6 +336,18 @@ router.put("/users/:id/balance", async (req: AuthenticatedRequest, res: Response
             description: `Admin balance adjustment. Reason: ${reason || "No reason specified"}`
           }
         });
+
+      // Record Revenue in FinanceLog automatically
+      await tx.financeLog.create({
+        data: {
+          type: "REVENUE",
+          category: "STORE",
+          amount: deposit.amount,
+          currency: "USD",
+          description: `شحن رصيد نقدي للمستخدم ${deposit.userId}`
+        }
+      });
+
       }
 
       if (cashDiff !== 0) {
@@ -1125,3 +1137,150 @@ router.get("/finance/stats", requireSuperAdmin, async (req, res) => {
 
 export default router;
 
+
+
+// ==================== STORE MANAGEMENT ====================
+
+// Products CRUD
+router.get("/store/products", async (req, res) => {
+  try {
+    const products = await prisma.product.findMany({ orderBy: { createdAt: "desc" } });
+    return res.json({ products });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch products" });
+  }
+});
+
+router.post("/store/products", async (req, res) => {
+  try {
+    const { name, description, priceCoins, imageUrl, category, stock } = req.body;
+    const product = await prisma.product.create({
+      data: { name, description, priceCoins: parseFloat(priceCoins), imageUrl, category, stock: parseInt(stock) || -1 }
+    });
+    return res.json({ success: true, product });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to create product" });
+  }
+});
+
+router.put("/store/products/:id", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  try {
+    const { name, description, priceCoins, imageUrl, category, stock, isActive } = req.body;
+    const product = await prisma.product.update({
+      where: { id: req.params.id },
+      data: { name, description, priceCoins: parseFloat(priceCoins), imageUrl, category, stock: parseInt(stock), isActive }
+    });
+    return res.json({ success: true, product });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to update product" });
+  }
+});
+
+router.delete("/store/products/:id", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  try {
+    await prisma.product.delete({ where: { id: req.params.id } });
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete product" });
+  }
+});
+
+// Payment Methods CRUD
+router.get("/store/payment-methods", async (req, res) => {
+  try {
+    const methods = await prisma.paymentMethod.findMany();
+    return res.json({ methods });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch payment methods" });
+  }
+});
+
+router.post("/store/payment-methods", async (req, res) => {
+  try {
+    const { name, currency, accountNumber } = req.body;
+    const method = await prisma.paymentMethod.create({
+      data: { name, currency, accountNumber }
+    });
+    return res.json({ success: true, method });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to create payment method" });
+  }
+});
+
+router.put("/store/payment-methods/:id", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  try {
+    const { name, currency, accountNumber, isActive } = req.body;
+    const method = await prisma.paymentMethod.update({
+      where: { id: req.params.id },
+      data: { name, currency, accountNumber, isActive }
+    });
+    return res.json({ success: true, method });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to update payment method" });
+  }
+});
+
+// Orders Management
+router.get("/store/orders", async (req, res) => {
+  try {
+    const orders = await prisma.order.findMany({
+      include: { user: true, product: true },
+      orderBy: { createdAt: "desc" }
+    });
+    return res.json({ orders });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch orders" });
+  }
+});
+
+router.post("/store/orders/:id/approve", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  try {
+    const { deliveryDetails } = req.body;
+    const order = await prisma.order.update({
+      where: { id: req.params.id },
+      data: { status: "DELIVERED", deliveryDetails }
+    });
+    return res.json({ success: true, order });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to approve order" });
+  }
+});
+
+router.post("/store/orders/:id/reject", async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  try {
+    const { rejectionReason } = req.body;
+    
+    // Refund coins inside transaction
+    const order = await prisma.$transaction(async (tx) => {
+      const o = await tx.order.findUnique({ where: { id: req.params.id }, include: { product: true } });
+      if (!o || o.status !== "PENDING") throw new Error("Invalid order");
+      
+      const updatedOrder = await tx.order.update({
+        where: { id: o.id },
+        data: { status: "REJECTED", rejectionReason }
+      });
+      
+      // Refund coins
+      await tx.wallet.update({
+        where: { userId: o.userId },
+        data: { freeBalance: { increment: o.priceCoins } }
+      });
+      
+      await tx.transaction.create({
+        data: {
+          userId: o.userId,
+          amount: o.priceCoins,
+          currency: "FREE",
+          type: "STORE_REFUND",
+          description: `استرجاع كونزات طلب #${o.id.substring(0,6)}`
+        }
+      });
+      
+      return updatedOrder;
+    });
+    
+    return res.json({ success: true, order });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || "Failed to reject order" });
+  }
+});

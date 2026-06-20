@@ -1036,3 +1036,114 @@ router.post("/watch-ad", authenticateToken, async (req: AuthenticatedRequest, re
 });
 
 export default router;
+
+
+// ==================== STORE & PURCHASES ====================
+
+// Get all active products
+router.get("/store/products", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  try {
+    const products = await prisma.product.findMany({
+      where: { isActive: true },
+      orderBy: { createdAt: "desc" }
+    });
+    return res.json({ products });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load products." });
+  }
+});
+
+// Get all active payment methods
+router.get("/store/payment-methods", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  try {
+    const methods = await prisma.paymentMethod.findMany({
+      where: { isActive: true }
+    });
+    return res.json({ methods });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load payment methods." });
+  }
+});
+
+// Purchase a product
+router.post("/store/purchase", authenticateToken, restrictGuest, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.user!.userId;
+  const { productId, userNotes } = req.body;
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Get product
+      const product = await tx.product.findUnique({ where: { id: productId } });
+      if (!product || !product.isActive) {
+        throw new Error("المنتج غير موجود أو غير متاح حالياً.");
+      }
+
+      // 2. Check stock
+      if (product.stock === 0) {
+        throw new Error("عذراً، نفدت كمية هذا المنتج.");
+      }
+
+      // 3. Get user wallet
+      const wallet = await tx.wallet.findUnique({ where: { userId } });
+      if (!wallet || wallet.freeBalance < product.priceCoins) {
+        throw new Error("رصيدك من الكونزات غير كافٍ لإتمام عملية الشراء.");
+      }
+
+      // 4. Deduct coins
+      await tx.wallet.update({
+        where: { userId },
+        data: { freeBalance: { decrement: product.priceCoins } }
+      });
+
+      // 5. Create transaction log
+      await tx.transaction.create({
+        data: {
+          userId,
+          amount: product.priceCoins,
+          currency: "FREE",
+          type: "STORE_PURCHASE",
+          description: `شراء من المتجر: ${product.name}`
+        }
+      });
+
+      // 6. Create Order
+      const order = await tx.order.create({
+        data: {
+          userId,
+          productId,
+          priceCoins: product.priceCoins,
+          userNotes
+        }
+      });
+
+      // 7. Update stock
+      if (product.stock > 0) {
+        await tx.product.update({
+          where: { id: productId },
+          data: { stock: { decrement: 1 } }
+        });
+      }
+
+      return order;
+    });
+
+    return res.json({ success: true, order: result });
+  } catch (err: any) {
+    return res.status(400).json({ error: err.message || "فشلت عملية الشراء." });
+  }
+});
+
+// Get user orders
+router.get("/store/orders", authenticateToken, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+  const userId = req.user!.userId;
+  try {
+    const orders = await prisma.order.findMany({
+      where: { userId },
+      include: { product: true },
+      orderBy: { createdAt: "desc" }
+    });
+    return res.json({ orders });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load orders." });
+  }
+});
